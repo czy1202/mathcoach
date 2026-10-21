@@ -133,7 +133,7 @@ if __name__ == "__main__":
     print("用户：", question)
     print("-" * 40)
 
-    agent = Agent(verbose=True)
+    agent = Agent(verbose=False)
     answer = agent.run(question)
 
     print("-" * 40)
