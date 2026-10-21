@@ -1,0 +1,24 @@
+{"id": "M-01", "topic": "极限", "difficulty": "易", "statement": "计算极限 lim_{x→0} (tan x - sin x)/x^3。", "answer": "1/2", "judge": "symbolic", "expect": "solve"}
+{"id": "M-02", "topic": "极限", "difficulty": "中", "statement": "计算极限 lim_{x→0} (e^x - 1 - x)/x^2。", "answer": "1/2", "judge": "symbolic", "expect": "solve"}
+{"id": "M-03", "topic": "极限", "difficulty": "中", "statement": "计算极限 lim_{x→∞} x(√(x^2+1) - x)。", "answer": "1/2", "judge": "symbolic", "expect": "solve"}
+{"id": "M-04", "topic": "极限", "difficulty": "易", "statement": "计算极限 lim_{x→0} sin(3x)/x。", "answer": "3", "judge": "numeric", "expect": "solve"}
+{"id": "M-05", "topic": "导数", "difficulty": "易", "statement": "设 y = x^x（x > 0），求 y'(1)。", "answer": "1", "judge": "symbolic", "expect": "solve"}
+{"id": "M-06", "topic": "导数", "difficulty": "中", "statement": "设 f(x) = ln(x + √(1+x^2))，求 f'(0)。", "answer": "1", "judge": "symbolic", "expect": "solve"}
+{"id": "M-07", "topic": "导数", "difficulty": "中", "statement": "求函数 y = x^2 sin x 的导数。", "answer": "2*x*sin(x) + x**2*cos(x)", "judge": "symbolic", "expect": "solve"}
+{"id": "M-08", "topic": "导数", "difficulty": "中", "statement": "函数 f(x)=x^3-3x 在区间 [-2,2] 上的最大值是（ ）。 A. 0 B. 2 C. 4 D. 6。只回答选项字母。", "answer": "B", "judge": "exact", "expect": "solve"}
+{"id": "M-09", "topic": "积分", "difficulty": "易", "statement": "计算定积分 ∫_0^1 x e^x dx。", "answer": "1", "judge": "symbolic", "expect": "solve"}
+{"id": "M-10", "topic": "积分", "difficulty": "中", "statement": "计算定积分 ∫_0^{π/2} sin^2 x dx。", "answer": "pi/4", "judge": "symbolic", "expect": "solve"}
+{"id": "M-11", "topic": "积分", "difficulty": "易", "statement": "计算定积分 ∫_0^1 1/(1+x^2) dx。", "answer": "pi/4", "judge": "symbolic", "expect": "solve"}
+{"id": "M-12", "topic": "级数", "difficulty": "中", "statement": "计算级数 ∑_{n=1}^∞ 1/n^2 的和。", "answer": "pi**2/6", "judge": "symbolic", "expect": "solve"}
+{"id": "M-13", "topic": "级数", "difficulty": "中", "statement": "计算级数 ∑_{n=1}^∞ 1/(n(n+1)) 的和。", "answer": "1", "judge": "symbolic", "expect": "solve"}
+{"id": "M-14", "topic": "级数", "difficulty": "难", "statement": "求幂级数 ∑_{n=1}^∞ n! x^n 的收敛半径。只回答数值。", "answer": "0", "judge": "exact", "expect": "solve"}
+{"id": "M-15", "topic": "线性代数", "difficulty": "易", "statement": "计算二阶行列式 |1 2; 3 4| 的值。", "answer": "-2", "judge": "symbolic", "expect": "solve"}
+{"id": "M-16", "topic": "线性代数", "difficulty": "中", "statement": "求矩阵 [[1,2,3],[2,4,6],[0,1,1]] 的秩。只回答一个整数。", "answer": "2", "judge": "exact", "expect": "solve"}
+{"id": "M-17", "topic": "概率", "difficulty": "易", "statement": "同时掷两枚均匀的六面骰子，点数之和为 7 的概率是多少？", "answer": "1/6", "judge": "numeric", "expect": "solve"}
+{"id": "M-18", "topic": "概率", "difficulty": "易", "statement": "连续抛掷一枚均匀硬币 3 次，恰好出现 2 次正面的概率是多少？", "answer": "3/8", "judge": "symbolic", "expect": "solve"}
+{"id": "M-19", "topic": "概率", "difficulty": "中", "statement": "设随机变量 X 服从二项分布 B(10, 0.3)，求期望 E(X)。", "answer": "3", "judge": "numeric", "expect": "solve"}
+{"id": "M-20", "topic": "概率", "difficulty": "中", "statement": "设随机变量 X 在区间 [0,1] 上服从均匀分布，求方差 Var(X)。", "answer": "1/12", "judge": "symbolic", "expect": "solve"}
+{"id": "M-21", "topic": "数列", "difficulty": "中", "statement": "已知数列 {a_n} 满足递推关系 a_{n+1} = 2a_n + 1，求通项公式 a_n。", "answer": null, "judge": "manual", "expect": "refuse"}
+{"id": "M-22", "topic": "函数", "difficulty": "中", "statement": "求函数 f(x) 在区间 [0,1] 上的最大值。", "answer": null, "judge": "manual", "expect": "refuse"}
+{"id": "M-23", "topic": "数论", "difficulty": "难", "statement": "证明：每个大于 2 的偶数都可以写成两个质数之和。", "answer": null, "judge": "manual", "expect": "refuse"}
+{"id": "M-24", "topic": "线性代数", "difficulty": "易", "statement": "求矩阵 A 的全部特征值。", "answer": null, "judge": "manual", "expect": "refuse"}
