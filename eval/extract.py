@@ -93,11 +93,17 @@ def _looks_like_answer(text: str) -> bool:
     return bool(text) and len(text) <= 80 and bool(_ANSWER_HINT_RE.search(text))
 
 
-def extract_final_answer(text: str | None) -> str | None:
+def extract_final_answer(
+    text: str | None,
+    allow_fallback: bool = True,
+) -> str | None:
     """从整段回答中提取最终答案。
 
     Args:
         text: 模型的完整回答。
+        allow_fallback: 没有答案标记时，是否退化为“最后一行像答案的文本”。
+            评测和完整解答需要兜底；追问回答通常没有固定答案行，传 False
+            可以避免把一句解释误当成答案。
 
     Returns:
         str | None: 清洗后的答案；找不到任何可用内容时返回 None。
@@ -105,7 +111,8 @@ def extract_final_answer(text: str | None) -> str | None:
     规则：
         1. 从后往前找最后一个答案标记，取该行标记之后的内容；
         2. 标记后为空时，取下一行非空内容；
-        3. 完全没有标记时，退化为最后一行“像答案”的文本；
+        3. 完全没有标记且 allow_fallback=True 时，退化为最后一行
+           “像答案”的文本；
         4. 仍找不到则返回 None。
     """
     if not text or not text.strip():
@@ -125,6 +132,9 @@ def extract_final_answer(text: str | None) -> str | None:
         result = _clean(candidate)
         if result:
             return result
+
+    if not allow_fallback:
+        return None
 
     for line in reversed(lines):
         cleaned = _clean(line)

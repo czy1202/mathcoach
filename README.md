@@ -40,7 +40,7 @@ python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 121 个测试
+pytest                              # 139 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -66,7 +66,10 @@ python -m web.app
 
 - Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
 - 回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
-- 显示耗时、模型调用次数、工具调用次数、token 用量
+- 同一页面内支持追问：服务端保存"第一轮原题 + 最近 3 轮"，自动做上下文裁剪；
+  追问时不会强制重复完整解题格式
+- 顶栏"新对话"会清空当前会话和页面消息
+- 显示耗时、轮次、模型调用次数、工具调用次数、token 用量
 - 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
 - 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
 
@@ -74,8 +77,17 @@ python -m web.app
 
 ![Web 问答与公式渲染](docs/web-preview.png)
 
-后端只有一个 `POST /api/ask` 接口，解题逻辑全部复用 `agent.Agent`，
-Web 层只做 HTTP 包装和展示字段整理；方便后续替换成带会话、流式输出的版本。
+![多轮追问](docs/web-followup.png)
+
+后端接口：
+
+- `POST /api/ask`：请求体 `{question, session_id?}`；首次提问不传 `session_id`，
+  响应会返回服务端生成的 id，后续追问带同一个 id
+- `DELETE /api/session/{session_id}`：结束会话，"新对话"按钮会调用
+
+解题逻辑全部复用 `agent.Agent`，Web 层只做 HTTP 包装、会话管理和展示字段整理。
+会话只存在进程内存里，服务重启后旧 id 自动失效并开始新会话；页面刷新也会开始
+新对话（前端不持久化 session_id）。
 
 ## 评测结果
 
@@ -148,7 +160,9 @@ mathcoach/
 ├── config.py           # 读取 .env
 ├── web/
 │   ├── app.py          # FastAPI 后端：静态页 + /api/ask + /api/health
+│   ├── sessions.py     # 内存会话、TTL、上下文裁剪
 │   ├── test_app.py
+│   ├── test_sessions.py
 │   └── static/         # 单页前端；KaTeX / markdown-it / DOMPurify 本地化
 ├── eval/
 │   ├── cases.jsonl     # 24 道评测题
@@ -170,8 +184,10 @@ mathcoach/
 - 拒答识别仍是关键词匹配，措辞变化可能误判。后续计划换成 LLM-as-judge，
   并用混淆矩阵评估。
 - 评测集只有 24 题，且每版只跑一次，无法反映模型波动。
-- Web 版没有登录、限流和公网部署方案，只适合本机演示；刷新页面会丢对话。
-- 无检索、无多轮对话、无流式输出。
+- Web 版没有登录、限流和公网部署方案，只适合本机演示。
+- 多轮会话只存在服务端内存：服务重启丢失；刷新页面会开始新对话；没有跨会话的
+  长期记忆。
+- 无检索、无流式输出。
 
 ## 下一步
 
@@ -180,4 +196,4 @@ mathcoach/
    rerank），把检索做成 Agent 可调用的工具。
 3. 答案附带引用（出自哪年哪题、哪个知识点），并推荐同知识点的真题。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
-5. 完善 Web 版：多轮会话、流式输出、图片输入，以及带登录和限流后的公网部署。
+5. 完善 Web 版：流式输出、图片输入，以及带登录和限流后的公网部署。

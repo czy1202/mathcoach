@@ -14,7 +14,6 @@
 import re
 import threading
 import time
-import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -27,6 +26,7 @@ from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
 from tracing import TraceRecorder, new_trace_file
+from web.sessions import SessionStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -56,6 +56,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 _client = None
 _client_lock = threading.Lock()
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+SESSIONS = SessionStore()
 
 
 def get_client():
@@ -77,6 +78,11 @@ class AskRequest(BaseModel):
         max_length=MAX_QUESTION_CHARS,
         description="用户输入的题目文本",
     )
+    session_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="服务端返回的会话 id；首次提问不传",
+    )
 
 
 class StepInfo(BaseModel):
@@ -97,6 +103,9 @@ class ToolInfo(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     display_answer: str
+    session_id: str
+    turn: int = 1
+    follow_up: bool = False
     final_answer: str | None = None
     error: str | None = None
     elapsed: float = 0.0
@@ -192,7 +201,7 @@ def health() -> dict:
 
 @app.post("/api/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
-    """求解一道题。"""
+    """求解一道题，或在已有会话里追问。"""
     question = req.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="题目不能为空。")
@@ -207,44 +216,89 @@ def ask(req: AskRequest) -> AskResponse:
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
     try:
-        trace_path = new_trace_file(TRACE_DIR, prefix="web")
-        tracer = TraceRecorder(
-            case_id=f"web-{uuid.uuid4().hex[:8]}",
-            question=question,
-            path=trace_path,
-        )
+        session = SESSIONS.get_or_create(req.session_id)
 
-        start = time.perf_counter()
+        # 同一个会话串行处理，避免两条追问同时读到同一份旧上下文
+        if not session.lock.acquire(timeout=0.5):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话正在处理上一条消息，请稍后再试。",
+            )
+
         try:
-            answer = Agent(client=get_client()).run(question, trace=tracer)
-        except Exception as e:  # 单题失败不拖垮服务
-            answer = f"错误：求解失败（{type(e).__name__}: {e}）"
-            tracer.add("error", kind="agent_exception", message=answer)
-        elapsed = time.perf_counter() - start
+            history = SESSIONS.history_for(session)
+            follow_up = bool(history)
+            turn = len(session.turns) + 1
 
-        tracer.finish(request_elapsed=round(elapsed, 4))
+            trace_path = new_trace_file(TRACE_DIR, prefix="web")
+            tracer = TraceRecorder(
+                case_id=f"web-{session.id[:8]}-t{turn}",
+                question=question,
+                path=trace_path,
+            )
 
-        final_answer = extract_final_answer(answer)
-        error = tracer.error
-        if error is None and answer.startswith("错误："):
-            error = answer
+            start = time.perf_counter()
+            try:
+                answer = Agent(client=get_client()).run(
+                    question,
+                    trace=tracer,
+                    history=history,
+                )
+            except Exception as e:  # 单题失败不拖垮服务
+                answer = f"错误：求解失败（{type(e).__name__}: {e}）"
+                tracer.add("error", kind="agent_exception", message=answer)
+            elapsed = time.perf_counter() - start
 
-        return AskResponse(
-            answer=answer,
-            display_answer=strip_answer_marker(normalize_math_delimiters(answer)),
-            final_answer=final_answer,
-            error=error,
-            elapsed=round(elapsed, 2),
-            llm_calls=tracer.llm_calls,
-            tool_calls=tracer.tool_calls,
-            tool_errors=tracer.tool_errors,
-            tokens=tracer.usage["total_tokens"],
-            trace_file=trace_path.name,
-            steps=collect_steps(tracer.events),
-            tools=collect_tools(tracer.events),
-        )
+            tracer.finish(
+                request_elapsed=round(elapsed, 4),
+                session_id=session.id,
+                turn=turn,
+                follow_up=follow_up,
+                history_messages=len(history),
+                history_chars=sum(len(m["content"]) for m in history),
+            )
+
+            # 追问回答通常没有固定答案行，关掉兜底，避免把解释误当答案
+            final_answer = extract_final_answer(
+                answer,
+                allow_fallback=not follow_up,
+            )
+            error = tracer.error
+            if error is None and answer.startswith("错误："):
+                error = answer
+
+            if error is None:
+                SESSIONS.append_turn(session, question, answer)
+
+            return AskResponse(
+                answer=answer,
+                display_answer=strip_answer_marker(
+                    normalize_math_delimiters(answer)
+                ),
+                session_id=session.id,
+                turn=turn,
+                follow_up=follow_up,
+                final_answer=final_answer,
+                error=error,
+                elapsed=round(elapsed, 2),
+                llm_calls=tracer.llm_calls,
+                tool_calls=tracer.tool_calls,
+                tool_errors=tracer.tool_errors,
+                tokens=tracer.usage["total_tokens"],
+                trace_file=trace_path.name,
+                steps=collect_steps(tracer.events),
+                tools=collect_tools(tracer.events),
+            )
+        finally:
+            session.lock.release()
     finally:
         _slots.release()
+
+
+@app.delete("/api/session/{session_id}", include_in_schema=False)
+def delete_session(session_id: str) -> dict:
+    """结束一个会话；页面上的“新对话”会调用这里。"""
+    return {"ok": SESSIONS.reset(session_id)}
 
 
 if __name__ == "__main__":

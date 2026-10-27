@@ -23,6 +23,11 @@
   box-sizing: border-box;
 }
 
+/* 让 hidden 属性压过组件自己的 display: flex / block */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -105,6 +110,35 @@ textarea {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.ghost-btn {
+  padding: 7px 13px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.78rem;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: color 0.18s ease, border-color 0.18s ease, opacity 0.18s ease;
+}
+
+.ghost-btn:hover:not(:disabled) {
+  border-color: #c7d2fe;
+  color: var(--accent-deep);
+}
+
+.ghost-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .status {
@@ -642,8 +676,16 @@ textarea {
     display: none;
   }
 
-  .status {
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .ghost-btn {
     padding: 6px 9px;
+  }
+
+  .status {
+    display: none;
   }
 
   .chat {

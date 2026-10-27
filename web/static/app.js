@@ -7,10 +7,13 @@
   const form = document.getElementById("form");
   const input = document.getElementById("question");
   const sendBtn = document.getElementById("send");
+  const newChatBtn = document.getElementById("new-chat");
   const status = document.getElementById("status");
   const statusText = document.getElementById("status-text");
 
+  const DEFAULT_PLACEHOLDER = input.placeholder;
   let busy = false;
+  let sessionId = null;
 
   // ---------- Markdown / 公式渲染 ----------
 
@@ -67,7 +70,11 @@
   // ---------- 消息 DOM ----------
 
   function hideWelcome() {
-    if (welcome && welcome.parentNode) welcome.remove();
+    if (welcome) welcome.hidden = true;
+  }
+
+  function showWelcome() {
+    if (welcome) welcome.hidden = false;
   }
 
   function appendUser(text) {
@@ -83,10 +90,11 @@
 
   function scrollToElement(element) {
     if (!element) return;
-    chat.scrollTo({
-      top: element.offsetTop - 18,
-      behavior: "smooth",
-    });
+    const top = element.getBoundingClientRect().top
+      - chat.getBoundingClientRect().top
+      + chat.scrollTop
+      - 18;
+    chat.scrollTo({ top, behavior: "smooth" });
   }
 
   function createPending() {
@@ -191,6 +199,9 @@
       `工具 ${data.tool_calls || 0} 次`,
       `${Number(data.tokens || 0).toLocaleString()} tokens`,
     ];
+    if (Number(data.turn || 1) > 1) {
+      parts.unshift(`第 ${data.turn} 轮`);
+    }
     if (data.tool_errors) parts.push(`工具错误 ${data.tool_errors} 次`);
     meta.textContent = parts.join(" · ");
 
@@ -243,8 +254,30 @@
   function setBusy(next) {
     busy = next;
     sendBtn.disabled = next;
+    newChatBtn.disabled = next;
     input.disabled = next;
     sendBtn.querySelector(".send-label").textContent = next ? "求解中" : "发送";
+  }
+
+  function startNewChat() {
+    if (busy) return;
+
+    const oldSession = sessionId;
+    sessionId = null;
+    chat.querySelectorAll(".message").forEach((node) => node.remove());
+    showWelcome();
+
+    input.value = "";
+    input.placeholder = DEFAULT_PLACEHOLDER;
+    resizeInput();
+    chat.scrollTo({ top: 0, behavior: "smooth" });
+    input.focus();
+
+    if (oldSession) {
+      fetch(`/api/session/${oldSession}`, { method: "DELETE" }).catch(() => {
+        // 删除失败不影响本地开新对话，旧会话会按 TTL 自行过期
+      });
+    }
   }
 
   function errorText(detail, statusCode) {
@@ -272,12 +305,14 @@
       const response = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({ question, session_id: sessionId }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(errorText(data.detail, response.status));
       }
+      sessionId = data.session_id || sessionId;
+      input.placeholder = "继续追问这道题，例如：这一步为什么？";
       clearInterval(pending._timer);
       pending.replaceWith(createAssistantMessage(data));
       // 回滚到用户刚问的那一题，让读者从题目和回答开头看起；
@@ -297,6 +332,8 @@
     event.preventDefault();
     submitQuestion();
   });
+
+  newChatBtn.addEventListener("click", startNewChat);
 
   input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {

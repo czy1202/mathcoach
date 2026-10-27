@@ -34,6 +34,42 @@ SYSTEM_PROMPT = """你是一名数学竞赛解题助手，请按下面的规则�
    矩阵没有给元素），必须先要求用户补充，不要引入假设条件后硬答。
 """
 
+# 只有携带上文时才追加。追问和新题的处理方式不同，否则用户问
+# “这一步为什么”也会收到一整篇知识点 + 完整解答。
+FOLLOWUP_PROMPT = """
+当前对话包含之前的问题和解答。请额外遵守：
+7. 如果用户是在追问上一题（例如“这一步为什么”“再详细一点”
+   “还有别的方法吗”），结合上一轮的题目和解答直接回答被问到的部分；
+   不必重复完整的四段格式，也不必在最后重复“最终答案：”行，
+   除非用户明确要求给出完整解答。
+8. 如果用户提出一道全新题目，仍按第 4、5 条输出完整格式。
+9. 不要编造上一轮没有出现过的条件或步骤；如果“这一步”“这个结果”
+   等指代不明确，先复述你的理解，再请用户确认。
+"""
+
+
+def clean_history(history: list[dict] | None) -> list[dict]:
+    """只保留合法的 user / assistant 文本消息。
+
+    历史由服务端会话提供，正常情况下已经是干净数据；这里再过滤一次，
+    避免调用方误传 system、tool 消息或空内容，破坏消息顺序。
+    """
+    if not isinstance(history, list):
+        return []
+
+    cleaned: list[dict] = []
+    for message in history:
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        content = content.strip()
+        if content:
+            cleaned.append({"role": role, "content": content})
+    return cleaned
+
 
 # ---------- Agent ----------
 
@@ -61,19 +97,39 @@ class Agent:
         self.step_timeout = step_timeout
         self.verbose = verbose
 
-    def run(self, user_input: str, trace=None) -> str:
-        """求解一道题。
+    def run(
+        self,
+        user_input: str,
+        trace=None,
+        history: list[dict] | None = None,
+    ) -> str:
+        """求解一道题，或基于历史回答一次追问。
 
         Args:
-            user_input: 用户输入的题目文本
+            user_input: 用户当前输入的问题或追问
             trace: 可选的轨迹记录器，需提供 add(event_type, **fields) 方法。
                    Agent 不依赖具体实现，不传时完全不影响原有行为。
+            history: 之前的问答消息，只应包含 user / assistant 的最终文本，
+                     不包含工具调用记录。为空时行为和单轮求解完全一致。
 
         Returns:
             str: 模型的最终文字答案；触发护栏时返回明确的错误提示。
         """
+        history = clean_history(history)
+        system_prompt = SYSTEM_PROMPT
+        if history:
+            system_prompt += FOLLOWUP_PROMPT
+            self._emit(
+                trace,
+                "context",
+                history_messages=len(history),
+                history_chars=sum(len(m["content"]) for m in history),
+                follow_up=True,
+            )
+
         messages: list[dict] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
+            *history,
             {"role": "user", "content": user_input},
         ]
 

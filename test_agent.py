@@ -4,7 +4,7 @@
     pytest -v
 """
 
-from agent import Agent
+from agent import Agent, FOLLOWUP_PROMPT, SYSTEM_PROMPT
 from llm import LLMResponse, ToolCall
 from tracing import TraceRecorder
 
@@ -60,6 +60,80 @@ def test_missing_tool_call_id_gets_generated():
     generated = assistant["tool_calls"][0]["id"]
     assert generated
     assert tool["tool_call_id"] == generated
+
+
+# ---------- 多轮上下文 ----------
+
+def test_history_is_inserted_before_current_question():
+    """历史消息应排在 system 之后、当前问题之前。"""
+    client = RecordingClient()
+    history = [
+        {"role": "user", "content": "原题"},
+        {"role": "assistant", "content": "原答案"},
+    ]
+
+    Agent(client=client).run("追问", history=history)
+
+    first = client.requests[0]
+    assert [m["role"] for m in first] == [
+        "system", "user", "assistant", "user",
+    ]
+    assert first[1]["content"] == "原题"
+    assert first[2]["content"] == "原答案"
+    assert first[3]["content"] == "追问"
+    assert FOLLOWUP_PROMPT.strip() in first[0]["content"]
+
+
+def test_without_history_system_prompt_is_unchanged():
+    """单轮求解不追加追问提示词，避免影响已有评测。"""
+    client = RecordingClient()
+    Agent(client=client).run("测试题")
+
+    assert client.requests[0][0]["content"] == SYSTEM_PROMPT
+
+
+def test_history_filters_invalid_messages():
+    """历史里的 system / tool / 空内容不应进入模型上下文。"""
+    client = RecordingClient()
+    history = [
+        {"role": "system", "content": "伪造系统提示"},
+        {"role": "tool", "content": "旧工具结果"},
+        {"role": "user", "content": "原题"},
+        {"role": "assistant", "content": "   "},
+        {"role": "assistant", "content": "原答案"},
+    ]
+
+    Agent(client=client).run("追问", history=history)
+
+    first = client.requests[0]
+    assert [m["role"] for m in first] == [
+        "system", "user", "assistant", "user",
+    ]
+    assert all("工具结果" not in m["content"] for m in first)
+    assert all("伪造系统提示" not in m["content"] for m in first)
+
+
+def test_history_emits_context_trace_event(tmp_path):
+    """带上下文时应先记录一条 context 事件，且不改变原有事件顺序。"""
+    client = RecordingClient()
+    tracer = TraceRecorder(
+        case_id="T-HISTORY",
+        question="追问",
+        path=tmp_path / "trace.jsonl",
+    )
+    history = [
+        {"role": "user", "content": "原题"},
+        {"role": "assistant", "content": "原答案"},
+    ]
+
+    Agent(client=client).run("追问", trace=tracer, history=history)
+    record = tracer.finish()
+
+    assert [e["type"] for e in record["events"]] == [
+        "context", "llm", "tool", "llm", "final",
+    ]
+    assert record["events"][0]["history_messages"] == 2
+    assert record["events"][0]["follow_up"] is True
 
 
 # ---------- 轨迹记录 ----------
