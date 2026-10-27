@@ -35,11 +35,12 @@ copy .env.example .env
 python ask.py "计算 lim(x→0) sin x / x"   # 真实模型一问一答
 python ask.py                              # 连续提问模式，exit 退出
 python ask.py --stub "1+1"                 # 离线假模型，不联网
+python -m web.app                          # 本地 Web 版，打开 http://127.0.0.1:8000
 python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 111 个测试
+pytest                              # 121 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -50,6 +51,31 @@ pytest                              # 111 个测试
 | `--limit N` | 只跑前 N 题，用于冒烟测试 |
 | `--trace-dir DIR` | 轨迹输出目录，默认 `traces/` |
 | `--no-trace` | 不写轨迹文件 |
+
+## Web 版（本地）
+
+```bash
+python -m web.app
+# 浏览器打开 http://127.0.0.1:8000
+```
+
+只监听 `127.0.0.1`，不需要登录；API Key 留在服务端 `.env`，浏览器拿不到。
+同一时间最多处理 2 道题，超过会直接返回 429，避免本地演示时并发消耗额度。
+
+页面能力：
+
+- Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
+- 回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
+- 显示耗时、模型调用次数、工具调用次数、token 用量
+- 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
+- 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
+
+![Web 欢迎页](docs/web-welcome.png)
+
+![Web 问答与公式渲染](docs/web-preview.png)
+
+后端只有一个 `POST /api/ask` 接口，解题逻辑全部复用 `agent.Agent`，
+Web 层只做 HTTP 包装和展示字段整理；方便后续替换成带会话、流式输出的版本。
 
 ## 评测结果
 
@@ -120,6 +146,10 @@ mathcoach/
 ├── tracing.py          # TraceRecorder：逐题写 JSONL
 ├── schemas.py          # Verdict 等数据结构
 ├── config.py           # 读取 .env
+├── web/
+│   ├── app.py          # FastAPI 后端：静态页 + /api/ask + /api/health
+│   ├── test_app.py
+│   └── static/         # 单页前端；KaTeX / markdown-it / DOMPurify 本地化
 ├── eval/
 │   ├── cases.jsonl     # 24 道评测题
 │   ├── judge.py        # symbolic / numeric / exact 判定
@@ -140,7 +170,8 @@ mathcoach/
 - 拒答识别仍是关键词匹配，措辞变化可能误判。后续计划换成 LLM-as-judge，
   并用混淆矩阵评估。
 - 评测集只有 24 题，且每版只跑一次，无法反映模型波动。
-- 无检索、无多轮对话、无前端。
+- Web 版没有登录、限流和公网部署方案，只适合本机演示；刷新页面会丢对话。
+- 无检索、无多轮对话、无流式输出。
 
 ## 下一步
 
@@ -149,4 +180,4 @@ mathcoach/
    rerank），把检索做成 Agent 可调用的工具。
 3. 答案附带引用（出自哪年哪题、哪个知识点），并推荐同知识点的真题。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
-5. Web 演示页：公式渲染、流式输出、轨迹可视化。
+5. 完善 Web 版：多轮会话、流式输出、图片输入，以及带登录和限流后的公网部署。

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>mathcoach · 数学竞赛解题助手</title>
+  <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
+  <link rel="stylesheet" href="/static/vendor/markdown-it-texmath/texmath.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">∑</span>
+        <div class="brand-text">
+          <h1>mathcoach</h1>
+          <p>CMC / 考研数学 · 会调用工具验证的解题助手</p>
+        </div>
+      </div>
+      <div class="status" id="status">
+        <span class="status-dot"></span>
+        <span id="status-text">正在检查模型…</span>
+      </div>
+    </header>
+
+    <main class="chat" id="chat">
+      <section class="welcome" id="welcome">
+        <p class="eyebrow">MATH · AGENT</p>
+        <h2>把题目交给我</h2>
+        <p class="lead">
+          我会给出涉及的知识点、解题思路和完整步骤，
+          关键计算交给 sympy 验证，最后单独给出答案。
+        </p>
+        <div class="examples" id="examples">
+          <button type="button" data-q="计算极限 lim(x→0) (tan x - sin x)/x^3">求极限：<span>(tan x − sin x)/x³</span></button>
+          <button type="button" data-q="求 ∫_0^1 x e^x dx">求积分：<span>∫₀¹ x eˣ dx</span></button>
+          <button type="button" data-q="求 y = x^2 sin x 的导数">求导数：<span>y = x² sin x</span></button>
+          <button type="button" data-q="已知 a_{n+1}=2a_n+1，求通项公式">缺条件题：<span>递推数列</span></button>
+        </div>
+        <p class="welcome-note">本地演示 · 回答由 AI 生成 · 关键计算已交给工具验证</p>
+      </section>
+    </main>
+
+    <footer class="composer">
+      <form id="form" autocomplete="off">
+        <textarea
+          id="question"
+          rows="1"
+          maxlength="5000"
+          placeholder="输入题目，例如：计算 lim(x→0) (tan x - sin x)/x^3"
+          aria-label="题目"
+        ></textarea>
+        <button id="send" type="submit" aria-label="发送">
+          <span class="send-arrow">↑</span>
+          <span class="send-label">发送</span>
+        </button>
+      </form>
+      <p class="hint">Enter 发送 · Shift + Enter 换行 · 回答仅供学习参考</p>
+    </footer>
+  </div>
+
+  <script src="/static/vendor/katex/katex.min.js"></script>
+  <script src="/static/vendor/markdown-it/markdown-it.umd.min.js"></script>
+  <script>
+    // markdown-it-texmath 只提供 CommonJS 导出，浏览器里用一个临时 shim 接住它
+    window.module = { exports: {} };
+    window.exports = window.module.exports;
+  </script>
+  <script src="/static/vendor/markdown-it-texmath/texmath.js"></script>
+  <script>
+    window.texmath = window.module.exports;
+    delete window.module;
+    delete window.exports;
+  </script>
+  <script src="/static/vendor/dompurify/purify.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
