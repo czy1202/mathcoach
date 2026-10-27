@@ -23,6 +23,7 @@ import random
 
 import sympy as sp
 
+from mathparse import parse_math
 from schemas import Verdict
 
 
@@ -40,8 +41,8 @@ SAMPLE_HIGH = 2.7       # 取样范围上限
 def _judge_symbolic(expect: str, actual: str) -> Verdict:
     """符号等价判定：化简 expect - actual，等于 0 算通过。"""
     try:
-        left = sp.sympify(expect)
-        right = sp.sympify(actual)
+        left = parse_math(expect)
+        right = parse_math(actual)
     except Exception:
         # 任一表达式解析失败，无法判断对错
         return Verdict.UNCERTAIN
@@ -80,8 +81,8 @@ def _judge_numeric(expect: str, actual: str, tol: float = DEFAULT_TOL) -> Verdic
         通过；某一组样本全部落在无定义点时会返回 UNCERTAIN。
     """
     try:
-        left = sp.sympify(expect)
-        right = sp.sympify(actual)
+        left = parse_math(expect)
+        right = parse_math(actual)
     except Exception:
         return Verdict.UNCERTAIN
 

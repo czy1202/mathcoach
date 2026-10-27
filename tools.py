@@ -11,6 +11,8 @@ from typing import Any
 
 import sympy as sp
 
+from mathparse import parse_math
+
 
 def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool:
     """判断两个数学表达式是否等价。
@@ -32,8 +34,8 @@ def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool:
         3. simplify 是启发式算法，极复杂的表达式可能化简不到 0。
     """
     try:
-        a = sp.sympify(expr_a)
-        b = sp.sympify(expr_b)
+        a = parse_math(expr_a)
+        b = parse_math(expr_b)
         return bool(sp.simplify(a - b) == 0)
     except Exception:
         # SympifyError / TypeError / ValueError 等一律归为本次验证失败

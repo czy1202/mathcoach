@@ -7,6 +7,8 @@
 不关心背后是 StubClient 还是真实的 OpenAIClient，方便第 10 步直接切换。
 """
 
+import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
@@ -21,11 +23,15 @@ STEP_TIMEOUT = 30.0     # 单轮模型调用的超时时间（秒）
 
 SYSTEM_PROMPT = """你是一名数学竞赛解题助手，请按下面的规则回答：
 
-1. 必须调用工具验证答案，不得自行心算后直接下结论。
+1. 计算题优先调用工具验证关键步骤，不得自行心算后直接下结论。
 2. 验证不通过时，根据工具返回的信息重新计算，可以重试。
-3. 无法验证时，明确标注"结果不确定"，不要编造结论。
+3. 证明题不需要调用 sympy 验证，但必须给出严谨、完整的推理链。
 4. 最终回答依次包含：涉及的知识点、解题思路、分步解题过程、最终答案。
-5. 如果题干信息不全，先要求用户补充条件，不要硬答。
+5. 回答的最后一行必须单独写成：最终答案：<简洁答案>。
+   选择题写选项字母；证明题写“得证”或最终结论；不要在这一行写解释，
+   也不要在正文其他位置重复这个标记。
+6. 如果题干信息不全（例如递推数列没有给首项、函数没有给表达式、
+   矩阵没有给元素），必须先要求用户补充，不要引入假设条件后硬答。
 """
 
 
@@ -55,11 +61,13 @@ class Agent:
         self.step_timeout = step_timeout
         self.verbose = verbose
 
-    def run(self, user_input: str) -> str:
+    def run(self, user_input: str, trace=None) -> str:
         """求解一道题。
 
         Args:
             user_input: 用户输入的题目文本
+            trace: 可选的轨迹记录器，需提供 add(event_type, **fields) 方法。
+                   Agent 不依赖具体实现，不传时完全不影响原有行为。
 
         Returns:
             str: 模型的最终文字答案；触发护栏时返回明确的错误提示。
@@ -70,23 +78,46 @@ class Agent:
         ]
 
         for step in range(1, self.max_steps + 1):
+            chat_start = time.perf_counter()
             try:
                 resp = self._chat_with_timeout(messages)
             except FutureTimeoutError:
                 # 超时视为该步失败并立即停止，避免连续超时累计等待
-                return (
+                message = (
                     f"错误：第 {step} 步调用模型超时"
                     f"（超过 {self.step_timeout} 秒），该步记为失败，已停止。"
                 )
+                self._emit(trace, "error", step=step, kind="timeout", message=message)
+                return message
             except Exception as e:
-                return f"错误：第 {step} 步调用模型失败（{type(e).__name__}: {e}）。"
+                message = f"错误：第 {step} 步调用模型失败（{type(e).__name__}: {e}）。"
+                self._emit(trace, "error", step=step, kind="llm_error", message=message)
+                return message
+
+            self._emit(
+                trace,
+                "llm",
+                step=step,
+                elapsed=round(time.perf_counter() - chat_start, 4),
+                content=resp.content,
+                tool_calls=[
+                    {"id": call.id, "name": call.name, "args": call.args}
+                    for call in resp.tool_calls
+                ],
+                usage=self._usage_dict(resp),
+            )
 
             # 没有工具调用，说明模型这次是在"说话"，也就是最终答案
             if not resp.tool_calls:
                 if not resp.content.strip():
-                    return "错误：模型既没有调用工具，也没有返回文字答案。"
+                    message = "错误：模型既没有调用工具，也没有返回文字答案。"
+                    self._emit(
+                        trace, "error", step=step, kind="empty_response", message=message
+                    )
+                    return message
                 if self.verbose:
                     print(f"[第 {step} 步] 模型给出最终答案")
+                self._emit(trace, "final", step=step, content=resp.content)
                 return resp.content
 
             # 模型这次是在"点单"：逐个执行工具，把结果回填进消息列表。
@@ -95,20 +126,81 @@ class Agent:
             if self.verbose:
                 print(f"[第 {step} 步] 模型请求调用 {len(resp.tool_calls)} 个工具")
 
-            for call in resp.tool_calls:
+            # OpenAI 兼容接口要求：下一条 tool 消息必须能对应上
+            # 前一条 assistant 消息里的 tool_calls，所以这里要先把模型这次
+            # 的调用原样写回消息列表，并保留每一条的 id。
+            call_ids = [
+                call.id or f"call_{step}_{i}"
+                for i, call in enumerate(resp.tool_calls, 1)
+            ]
+            messages.append({
+                "role": "assistant",
+                "content": resp.content or None,
+                "tool_calls": [
+                    {
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": json.dumps(
+                                call.args, ensure_ascii=False, default=str
+                            ),
+                        },
+                    }
+                    for call, call_id in zip(resp.tool_calls, call_ids)
+                ],
+            })
+
+            for call, call_id in zip(resp.tool_calls, call_ids):
                 if self.verbose:
                     print(f"  → 调用 {call.name}，参数：{call.args}")
+                tool_start = time.perf_counter()
                 result = run_tool(call.name, call.args)
+                elapsed = round(time.perf_counter() - tool_start, 6)
                 if self.verbose:
                     print(f"  ← 工具结果：{result}")
-                messages.append({"role": "tool", "content": str(result)})
+                self._emit(
+                    trace,
+                    "tool",
+                    step=step,
+                    tool_call_id=call_id,
+                    name=call.name,
+                    args=call.args,
+                    result=result,
+                    ok=not (
+                        isinstance(result, str) and result.startswith("错误：")
+                    ),
+                    elapsed=elapsed,
+                )
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": call.name,
+                    "content": str(result),
+                })
 
             # continue：带着工具结果进入下一轮，再问模型
 
-        return (
+        message = (
             f"错误：已达到最大步数 {self.max_steps}，"
             "模型仍未给出最终答案，已停止。"
         )
+        self._emit(trace, "error", step=self.max_steps, kind="max_steps", message=message)
+        return message
+
+    @staticmethod
+    def _emit(trace, event_type: str, **fields) -> None:
+        """向轨迹记录器发一个事件；没有记录器时什么都不做。"""
+        if trace is not None:
+            trace.add(event_type, **fields)
+
+    @staticmethod
+    def _usage_dict(resp: LLMResponse) -> dict[str, int]:
+        """从响应里取 usage，兼容没有 usage 字段的自定义客户端。"""
+        usage = getattr(resp, "usage", None)
+        if hasattr(usage, "as_dict"):
+            return usage.as_dict()
+        return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
     def _chat_with_timeout(self, messages: list[dict]) -> LLMResponse:
         """带超时地调用一次模型。

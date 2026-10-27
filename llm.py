@@ -27,6 +27,23 @@ class ToolCall:
 
     name: str                                   # 工具名，对应 TOOLS 的键
     args: dict[str, Any] = field(default_factory=dict)  # 参数字典
+    id: str = ""                                # 模型侧调用 id，回填结果时必须原样带回
+
+
+@dataclass
+class Usage:
+    """一次模型调用的 token 用量，用于成本统计和 trace。"""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
 
 
 @dataclass
@@ -38,6 +55,7 @@ class LLMResponse:
 
     content: str = ""                             # 回复文本
     tool_calls: list[ToolCall] = field(default_factory=list)  # 工具调用列表
+    usage: Usage = field(default_factory=Usage)   # token 用量，stub 客户端为 0
 
 
 # ---------- 工具注册表 → OpenAI tools 格式 ----------
@@ -126,9 +144,24 @@ class OpenAIClient:
                 # 参数不是合法 JSON 时交空字典，让 run_tool 返回参数错误，
                 # 再作为工具结果回填给模型自行纠正，而不是在这里中断。
                 args = {}
-            tool_calls.append(ToolCall(name=call.function.name, args=args))
+            tool_calls.append(ToolCall(
+                name=call.function.name,
+                args=args,
+                id=call.id or "",
+            ))
 
-        return LLMResponse(content=message.content or "", tool_calls=tool_calls)
+        raw_usage = getattr(resp, "usage", None)
+        usage = Usage(
+            prompt_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
+            completion_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
+            total_tokens=getattr(raw_usage, "total_tokens", 0) or 0,
+        )
+
+        return LLMResponse(
+            content=message.content or "",
+            tool_calls=tool_calls,
+            usage=usage,
+        )
 
 
 # ---------- 离线假客户端 ----------
@@ -153,7 +186,9 @@ class StubClient:
         self.call_count += 1
 
         if any(m.get("role") == "tool" for m in messages):
-            return LLMResponse(content="验证通过：两边等价，最终答案 1。")
+            return LLMResponse(
+                content="验证通过：两边等价。\n最终答案：1",
+            )
 
         return LLMResponse(
             content="",
@@ -164,6 +199,7 @@ class StubClient:
                         "expr_a": "(x + 1)**2",
                         "expr_b": "x**2 + 2*x + 1",
                     },
+                    id="call_stub_1",
                 )
             ],
         )

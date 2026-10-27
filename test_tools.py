@@ -17,6 +17,10 @@ from tools import TOOLS, run_tool, verify_with_sympy
         ("(x + 1)**2", "x**2 + 2*x + 1"),
         ("sin(x)**2 + cos(x)**2", "1"),
         ("(x**2 - 1)/(x - 1)", "x + 1"),
+        ("2*x*sin(x) + x**2*cos(x)", "2x sin x + x^2 cos x"),
+        ("(x + 1)**2", "x^2 + 2x + 1"),
+        ("pi**2/6", "π²/6"),
+        ("1/6", r"\frac16"),
     ],
 )
 def test_equivalent_expressions_return_true(expr_a, expr_b):

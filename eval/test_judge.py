@@ -23,6 +23,39 @@ def test_symbolic_expression_pass():
     assert judge_answer("x**2 + 2*x + 1", "(x + 1)**2", "symbolic") is Verdict.PASS
 
 
+def test_symbolic_implicit_multiplication_pass():
+    """人类写法（省略乘号、用 ^ 表示指数）也应能解析。"""
+    assert judge_answer(
+        "2*x*sin(x) + x**2*cos(x)",
+        "2x sin x + x^2 cos x",
+        "symbolic",
+    ) is Verdict.PASS
+
+
+def test_symbolic_latex_function_adjacent_pass():
+    """2x\\sin x 这类函数紧贴变量的 LaTeX 写法不能被并成一个符号。"""
+    assert judge_answer(
+        "2*x*sin(x) + x**2*cos(x)",
+        r"2x\sin x+x^2\cos x",
+        "symbolic",
+    ) is Verdict.PASS
+
+
+@pytest.mark.parametrize("actual", [
+    "π²/6",            # Unicode 上标
+    r"\frac{\pi^2}{6}",  # LaTeX
+    r"\frac{\pi^{2}}{6}",
+])
+def test_symbolic_latex_and_unicode_pass(actual):
+    """LaTeX 与 Unicode 写法应能换算成同一表达式。"""
+    assert judge_answer("pi**2/6", actual, "symbolic") is Verdict.PASS
+
+
+def test_symbolic_frac_shorthand_pass():
+    """\\frac16 这种简写也应能解析。"""
+    assert judge_answer("1/6", r"\frac16", "symbolic") is Verdict.PASS
+
+
 @pytest.mark.parametrize("actual", ["1/3", "0", "x + 1"])
 def test_symbolic_fail(actual):
     """不等价的答案应判为失败。"""
