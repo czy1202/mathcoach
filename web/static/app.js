@@ -164,6 +164,56 @@
     return body;
   }
 
+  function createRelatedCard(list) {
+    if (!Array.isArray(list) || !list.length) return null;
+
+    const box = document.createElement("section");
+    box.className = "related";
+
+    const head = document.createElement("div");
+    head.className = "related-head";
+    head.textContent = "相关真题";
+    box.appendChild(head);
+
+    const listEl = document.createElement("div");
+    listEl.className = "related-list";
+
+    list.forEach((item) => {
+      const card = document.createElement("div");
+      card.className = "related-item";
+
+      const source = document.createElement("div");
+      source.className = "related-source";
+      source.textContent = item.source || "CMC 历年真题";
+      card.appendChild(source);
+
+      const question = document.createElement("p");
+      question.className = "related-question";
+      question.textContent = item.question || "";
+      card.appendChild(question);
+
+      const tags = Array.isArray(item.knowledge_points)
+        ? item.knowledge_points.slice(0, 4)
+        : [];
+      if (tags.length) {
+        const tagRow = document.createElement("div");
+        tagRow.className = "related-tags";
+        tags.forEach((tag) => {
+          const chip = document.createElement("span");
+          chip.className = "related-tag";
+          chip.textContent = tag;
+          tagRow.appendChild(chip);
+        });
+        card.appendChild(tagRow);
+      }
+
+      listEl.appendChild(card);
+    });
+
+    box.appendChild(listEl);
+    return box;
+  }
+
   function createAssistantMessage(data) {
     const article = document.createElement("article");
     article.className = "message assistant";
@@ -175,6 +225,7 @@
           <div class="label">最终答案</div>
           <div class="value"></div>
         </div>
+        <div class="related-slot"></div>
         <div class="meta"></div>
         <details class="trace" hidden>
           <summary></summary>
@@ -191,6 +242,9 @@
       card.hidden = false;
       card.querySelector(".value").textContent = formatFinalAnswer(data.final_answer);
     }
+
+    const related = createRelatedCard(data.related_problems);
+    if (related) article.querySelector(".related-slot").appendChild(related);
 
     const meta = article.querySelector(".meta");
     const parts = [

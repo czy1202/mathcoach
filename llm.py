@@ -16,7 +16,7 @@ from typing import Any
 from openai import OpenAI
 
 import config
-from tools import TOOLS
+from tools import RETRIEVAL_TOOLS, TOOLS
 
 
 # ---------- 统一响应结构 ----------
@@ -72,10 +72,12 @@ def build_tools_schema(registry: dict[str, dict]) -> list[dict]:
     注意：
         参数类型目前统一按 string 生成，因为 verify_with_sympy 接收的是
         表达式字符串。以后加数值类工具时，需要在注册表里补充类型信息。
+        注册表里可以用 "必填" 指定 required 子集；不写则所有参数必填。
     """
     schema: list[dict] = []
     for name, info in registry.items():
         params = info.get("参数说明", {})
+        required = info.get("必填", list(params.keys()))
         schema.append({
             "type": "function",
             "function": {
@@ -87,7 +89,7 @@ def build_tools_schema(registry: dict[str, dict]) -> list[dict]:
                         key: {"type": "string", "description": desc}
                         for key, desc in params.items()
                     },
-                    "required": list(params.keys()),
+                    "required": list(required),
                 },
             },
         })
@@ -95,6 +97,7 @@ def build_tools_schema(registry: dict[str, dict]) -> list[dict]:
 
 
 TOOLS_SCHEMA: list[dict] = build_tools_schema(TOOLS)
+RETRIEVAL_TOOL_SCHEMA: list[dict] = build_tools_schema(RETRIEVAL_TOOLS)
 
 
 # ---------- 真实模型客户端 ----------

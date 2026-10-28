@@ -11,6 +11,7 @@
 4. 每道题写一条 trace，返回耗时、token 和工具调用摘要。
 """
 
+import json
 import re
 import threading
 import time
@@ -25,6 +26,7 @@ import config
 from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
+from tools import index_available, search_past_problems
 from tracing import TraceRecorder, new_trace_file
 from web.sessions import SessionStore
 
@@ -100,6 +102,16 @@ class ToolInfo(BaseModel):
     result: str = ""
 
 
+class RelatedProblem(BaseModel):
+    """相关真题卡片。只含题干和出处，解答由模型另行组织。"""
+
+    id: str = ""
+    source: str = ""
+    question: str = ""
+    knowledge_points: list[str] = Field(default_factory=list)
+    score: float = 0.0
+
+
 class AskResponse(BaseModel):
     answer: str
     display_answer: str
@@ -116,6 +128,7 @@ class AskResponse(BaseModel):
     trace_file: str | None = None
     steps: list[StepInfo] = Field(default_factory=list)
     tools: list[ToolInfo] = Field(default_factory=list)
+    related_problems: list[RelatedProblem] = Field(default_factory=list)
 
 
 # ---------- 纯函数 ----------
@@ -162,6 +175,77 @@ def collect_steps(events: list[dict]) -> list[dict]:
             "tool_count": len(event.get("tool_calls") or []),
         })
     return steps
+
+
+def _parse_hits(raw: object) -> list[dict]:
+    """把 search_past_problems 返回的 JSON 字符串解析成卡片字段。
+
+    工具结果会经过 trace 序列化，所以这里按字符串处理；解析失败
+    一律当成没有检索结果，不影响主答案展示。
+    """
+    if not isinstance(raw, str):
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+
+    hits: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question") or "").strip()
+        if not question:
+            continue
+        tags = item.get("knowledge_points") or []
+        hits.append({
+            "id": str(item.get("id") or ""),
+            "source": str(item.get("source") or ""),
+            "question": question,
+            "knowledge_points": [str(tag) for tag in tags][:6],
+            "score": float(item.get("score") or 0),
+        })
+    return hits
+
+
+def collect_related(
+    events: list[dict],
+    question: str,
+    *,
+    enabled: bool,
+    follow_up: bool = False,
+    limit: int = 3,
+) -> list[dict]:
+    """从轨迹里取检索结果；模型没调工具时补一次直接检索。
+
+    模型偶尔会跳过检索直接作答，这时仍应展示相关真题，所以做一次
+    fallback。追问不补检索：用户问的是“这一步为什么”，拿它去搜题库
+    只会得到无关结果。检索失败（题库缺失等）按无结果处理。
+    """
+    if not enabled:
+        return []
+
+    hits: list[dict] = []
+    seen: set[str] = set()
+    for event in events:
+        if event.get("type") != "tool" or event.get("name") != "search_past_problems":
+            continue
+        for hit in _parse_hits(event.get("result")):
+            key = hit["id"] or hit["question"]
+            if key in seen:
+                continue
+            seen.add(key)
+            hits.append(hit)
+
+    if not hits and not follow_up:
+        try:
+            hits = _parse_hits(search_past_problems(question, limit))
+        except Exception:
+            hits = []
+
+    return hits[:limit]
 
 
 def collect_tools(events: list[dict], max_result: int = 500) -> list[dict]:
@@ -237,9 +321,12 @@ def ask(req: AskRequest) -> AskResponse:
                 path=trace_path,
             )
 
+            # 题库没构建时不开检索工具，避免每轮都拿到“题库不存在”的工具错误
+            retrieval = index_available()
+
             start = time.perf_counter()
             try:
-                answer = Agent(client=get_client()).run(
+                answer = Agent(client=get_client(), retrieval=retrieval).run(
                     question,
                     trace=tracer,
                     history=history,
@@ -288,6 +375,12 @@ def ask(req: AskRequest) -> AskResponse:
                 trace_file=trace_path.name,
                 steps=collect_steps(tracer.events),
                 tools=collect_tools(tracer.events),
+                related_problems=collect_related(
+                    tracer.events,
+                    question,
+                    enabled=retrieval,
+                    follow_up=follow_up,
+                ),
             )
         finally:
             session.lock.release()

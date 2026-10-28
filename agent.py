@@ -12,7 +12,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 
-from llm import LLMResponse, StubClient, TOOLS_SCHEMA
+from llm import LLMResponse, RETRIEVAL_TOOL_SCHEMA, StubClient, TOOLS_SCHEMA
 from tools import run_tool
 
 
@@ -45,6 +45,16 @@ FOLLOWUP_PROMPT = """
 8. 如果用户提出一道全新题目，仍按第 4、5 条输出完整格式。
 9. 不要编造上一轮没有出现过的条件或步骤；如果“这一步”“这个结果”
    等指代不明确，先复述你的理解，再请用户确认。
+"""
+
+# 开启题库检索时追加，教模型什么时候检索、怎么用检索结果。
+RETRIEVAL_PROMPT = """
+当前接入了 CMC 非数学类历年真题库，请额外遵守：
+10. 用户提出一道新题时，先调用一次 search_past_problems，query 传完整题干
+    或本题最核心的表达式，用返回结果判断考点和出题风格；同一道题不要重复检索。
+11. 检索结果只是题库中其他题目的题干，不是本题的条件。禁止把其中的数字、
+    函数或结论搬进本题解答；需要提及时，最多用一句话说明最相关的一道题
+    及其相似点，不要在正文里复述题目原文，前端会另行展示相关真题卡片。
 """
 
 
@@ -82,6 +92,7 @@ class Agent:
         max_steps: int = MAX_STEPS,
         step_timeout: float = STEP_TIMEOUT,
         verbose: bool = False,
+        retrieval: bool = False,
     ) -> None:
         """初始化。
 
@@ -91,11 +102,17 @@ class Agent:
             max_steps: 最大循环步数
             step_timeout: 单轮模型调用的超时时间（秒）
             verbose: 是否打印每一步的过程，演示和调试时打开
+            retrieval: 是否开放真题库检索工具。默认关闭，
+                       这样没构建题库时也能正常跑原有流程。
         """
         self.client = client or StubClient()
         self.max_steps = max_steps
         self.step_timeout = step_timeout
         self.verbose = verbose
+        self.retrieval = retrieval
+        self.tools_schema = TOOLS_SCHEMA + (
+            RETRIEVAL_TOOL_SCHEMA if retrieval else []
+        )
 
     def run(
         self,
@@ -119,12 +136,16 @@ class Agent:
         system_prompt = SYSTEM_PROMPT
         if history:
             system_prompt += FOLLOWUP_PROMPT
+        if self.retrieval:
+            system_prompt += RETRIEVAL_PROMPT
+        if history or self.retrieval:
             self._emit(
                 trace,
                 "context",
                 history_messages=len(history),
                 history_chars=sum(len(m["content"]) for m in history),
-                follow_up=True,
+                follow_up=bool(history),
+                retrieval=self.retrieval,
             )
 
         messages: list[dict] = [
@@ -266,7 +287,7 @@ class Agent:
         真实模型客户端自身也会设置网络超时，避免线程永久挂起。
         """
         executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(self.client.chat, messages, TOOLS_SCHEMA)
+        future = executor.submit(self.client.chat, messages, self.tools_schema)
         try:
             return future.result(timeout=self.step_timeout)
         finally:
