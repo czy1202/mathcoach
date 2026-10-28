@@ -40,11 +40,12 @@ python ask.py --stub "1+1"                 # 离线假模型，不联网
 python -m web.app                          # 本地 Web 版，打开 http://127.0.0.1:8000
 python -m rag.build                        # 从本地真题 PDF 构建题库（需要先有 PDF）
 python -m rag.search "二重积分" --top 5     # 命令行检索真题
+python -m rag.evaluate --misses             # 检索评测：Recall@k / MRR
 python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 175 个测试
+pytest                              # 180 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -159,6 +160,43 @@ data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
 - 2018 年以前的试卷不分 A/B 类，统一标为“未分类”；检索 A 类时会把它们一并算入。
 - 2024/2025 两份试卷按卷面结构切分，其余按“题目N”切分。
 
+### 检索评测
+
+固定查询集 `rag/eval_queries.jsonl`，共 47 条人工标注查询：
+
+- `easy` 37 条：原题改写、公式查询、知识点关键词；
+- `hard` 10 条：只给语义描述，尽量避开题干原词（例如“圆环区域上带指数衰减因子的二重积分”）。
+
+```bash
+python -m rag.evaluate            # 对比 BM25 与标签加权
+python -m rag.evaluate --misses   # 列出未命中的查询
+```
+
+当前基线（k=5）：
+
+| 方案 | Recall@1 | Recall@5 | MRR |
+| --- | --- | --- | --- |
+| BM25（不加权） | 74.5% | 97.9% | 0.835 |
+| BM25 + 标签加权 | 74.5% | 97.9% | 0.835 |
+
+分难度（标签加权）：
+
+| 难度 | 条数 | Recall@1 | Recall@5 | MRR |
+| --- | --- | --- | --- | --- |
+| easy | 37 | 75.7% | 100.0% | 0.849 |
+| hard | 10 | 70.0% | 90.0% | 0.783 |
+
+三个结论：
+
+- 中文二元组 + 公式归一化让词面匹配已经很强：easy 集 Recall@5 100%，hard 集只有 1 条完全未命中。
+- 标签加权没有改变排序：Top-5 候选通常共享同一个知识点，乘性系数对所有候选相同，
+  等于乘了一个常数。这个方案需要重做，或直接让位给向量召回 + RRF。
+- 12 条查询的正确答案不是第 1 名，主要是被更长、词频更高的题挤到后面
+  （例如 q04 的 `∫_0^1 ln(1+x²) dx` 排第 4），这是 BM25 长度归一化的典型问题。
+
+> 查询集目前是初版标注，复核后再冻结为正式基线。修改检索逻辑后应重跑这张表，
+> 只看单个例子的“感觉更准了”不算数。
+
 ## 评测结果
 
 评测集 24 题：20 道求解（symbolic / numeric / exact 三种判分方式）+ 4 道
@@ -234,6 +272,8 @@ mathcoach/
 │   ├── textnorm.py     # 检索归一化、二元分词、知识点标签
 │   ├── bm25.py         # 纯 Python Okapi BM25
 │   ├── index.py        # 索引加载与 BM25 + 标签混合打分
+│   ├── evaluate.py     # 检索评测：Recall@1 / Recall@5 / MRR
+│   ├── eval_queries.jsonl  # 47 条标注查询
 │   └── search.py       # 命令行检索
 ├── data/               # 题库产物 problems.jsonl（已 gitignore）
 ├── web/
@@ -273,10 +313,11 @@ mathcoach/
 
 ## 下一步
 
-1. 扩充评测集，覆盖证明题、选择题和更多拒答措辞；引入多次运行与方差统计。
-2. 建检索评测集（人工标注 50 条查询），对比 BM25、标签加权、向量召回、
-   rerank 的 Recall@5 与 MRR，把消融结果写进 README。
-3. 在现有检索上加 `bge-small-zh-v1.5` 向量召回，用 RRF 与 BM25 融合；
-   视效果决定是否加 cross-encoder rerank。
+1. 扩充解题评测集，覆盖证明题、选择题和更多拒答措辞；引入多次运行与方差统计。
+2. 复核并冻结 47 条检索评测（重点看 hard 集），补更多同义改写和短查询，
+   把 BM25 基线固定下来。
+3. 加 `bge-small-zh-v1.5` 向量召回，用 RRF 与 BM25 融合，在同一评测集上对比
+   Recall@1 / Recall@5 / MRR；重点看 h01 这类语义查询是否被救回来，再决定要不要
+   cross-encoder rerank。同时重新设计或移除当前基本无效的标签加权。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
 5. 完善 Web 版：流式输出、图片输入，以及带登录和限流后的公网部署。

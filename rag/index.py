@@ -58,10 +58,12 @@ class ProblemIndex:
         stage: str | None = None,
         category: str | None = None,
         min_score: float = 0.0,
+        tag_weight: float = 0.25,
     ) -> list[SearchHit]:
         """混合打分：BM25 + 知识点重合度。
 
         知识点权重用乘性系数，避免不同查询的 BM25 分数量纲不一致。
+        tag_weight=0 时退化为纯 BM25，用于评测对比。
         """
         query_tokens = tokenize(query)
         query_tags = set(detect_tags(query))
@@ -80,7 +82,7 @@ class ProblemIndex:
             if query_tags:
                 tag_score = len(query_tags & self._doc_tags[index]) / len(query_tags)
 
-            score = base * (1 + 0.25 * tag_score)
+            score = base * (1 + tag_weight * tag_score)
             if score <= 0 or score < min_score:
                 continue
 

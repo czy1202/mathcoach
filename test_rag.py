@@ -12,6 +12,7 @@ import tools
 from agent import Agent
 from llm import LLMResponse
 from rag.bm25 import BM25
+from rag.evaluate import evaluate, load_queries
 from rag.index import ProblemIndex
 from rag.papers import dedupe, parse_recent_text, parse_retypeset_text
 from rag.textnorm import detect_tags, normalize_for_search, tokenize
@@ -59,6 +60,12 @@ def test_tokenize_uses_chinese_bigrams():
     """中文按二元组切分，数学术语无需词典即可匹配。"""
     tokens = tokenize("二重积分")
     assert {"二重", "重积", "积分"} <= set(tokens)
+
+
+def test_superscript_digits_normalize_to_plain_digits():
+    """用户打 x²，文档里是 x2，两者要能匹配。"""
+    assert "x2" in normalize_for_search("x²")
+    assert tokenize("x²") == tokenize("x2")
 
 
 # ---------- 知识点识别 ----------
@@ -207,6 +214,48 @@ def test_index_search_filters_by_stage_and_category():
 def test_index_search_excludes_zero_scores():
     hits = _sample_index().search("完全无关的查询词")
     assert hits == []
+
+
+def test_tag_weight_zero_falls_back_to_bm25():
+    """评测基线要能关掉标签加权，此时总分应等于 BM25。"""
+    hits = _sample_index().search("计算二重积分", k=3, tag_weight=0.0)
+    assert hits[0].score == hits[0].bm25
+
+
+# ---------- 检索评测 ----------
+
+def test_evaluate_maps_aliases_and_groups_tiers():
+    index = ProblemIndex([
+        {**_problem("p1", "计算二重积分，其中D由x+y=1围成"), "aliases": ["old-p1"]},
+        _problem("p2", "求幂级数的收敛域"),
+    ])
+    queries = [
+        {"id": "q1", "query": "计算二重积分", "expected_ids": ["old-p1"], "tier": "easy"},
+        {"id": "h1", "query": "幂级数收敛域", "expected_ids": ["p2"], "tier": "hard"},
+    ]
+    summary = evaluate(index, queries, k=5)
+
+    assert summary["n"] == 2
+    assert summary["recall_at_1"] == 1.0
+    assert summary["by_tier"]["easy"]["n"] == 1
+    assert summary["by_tier"]["hard"]["recall_at_k"] == 1.0
+
+
+def test_evaluate_reports_unknown_expected_ids():
+    summary = evaluate(
+        _sample_index(),
+        [{"id": "x1", "query": "计算二重积分", "expected_ids": ["nope"], "tier": "hard"}],
+        k=5,
+    )
+    assert summary["unknown_ids"] == ["nope"]
+    assert summary["recall_at_k"] == 0.0
+
+
+def test_load_queries_rejects_missing_expected(tmp_path):
+    path = tmp_path / "queries.jsonl"
+    path.write_text('{"query": "只有查询没有答案"}\n', encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_queries(path)
 
 
 # ---------- 工具层 ----------

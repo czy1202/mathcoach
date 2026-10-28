@@ -1,0 +1,47 @@
+{"id": "q01", "query": "求 (n!)^(1/n²) 当 n 趋于无穷时的极限", "expected_ids": ["cmc-04-prelim-x-01"], "tier": "easy"}
+{"id": "q02", "query": "求 n[(1+1/n)^n - e] 当 n→∞ 的极限", "expected_ids": ["cmc-01-final-x-05"], "tier": "easy"}
+{"id": "q03", "query": "求 e^{-x}(1+1/x)^{x²} 当 x→∞ 的极限", "expected_ids": ["cmc-02-prelim-x-02"], "tier": "easy"}
+{"id": "q04", "query": "计算 ∫_0^1 ln(1+x²) dx", "expected_ids": ["cmc-16-prelim-a-01"], "tier": "easy"}
+{"id": "q05", "query": "计算 ∫_0^{+∞} e^{-2x}|sin x| dx", "expected_ids": ["cmc-04-prelim-x-06"], "tier": "easy"}
+{"id": "q06", "query": "求不定积分 ∫(x²+1)/(x⁴+1) dx", "expected_ids": ["cmc-06-final-x-04"], "tier": "easy"}
+{"id": "q07", "query": "求二重积分 ∬_D (x²+y²-x-y) dxdy，D 是单位圆", "expected_ids": ["cmc-04-final-x-09"], "tier": "easy"}
+{"id": "q08", "query": "计算 ∬_D (x+y-x²) dxdy，D: x²+y²≤1", "expected_ids": ["cmc-14-prelim-s1-x-04"], "tier": "easy"}
+{"id": "q09", "query": "计算 ∬_D (x+y²)e^{-(x²+y²-4)} dxdy，D: 1≤x²+y²≤4", "expected_ids": ["cmc-07-final-x-02"], "tier": "easy"}
+{"id": "q10", "query": "第一型曲线积分 ∮_L |x|³ ds，L: |x|³+3|y|=1", "expected_ids": ["cmc-16-final-a-04"], "tier": "easy"}
+{"id": "q11", "query": "第二型曲线积分 ∮_L -y/(4x²+y²) dx + x/(4x²+y²) dy，L 为圆周 x²+y²=9 逆时针", "expected_ids": ["cmc-16-prelim-a-05"], "tier": "easy"}
+{"id": "q12", "query": "求幂级数 Σ (-1)^n x^n/(n·3^n) 的收敛域", "expected_ids": ["cmc-14-final-x-05"], "tier": "easy"}
+{"id": "q13", "query": "求幂级数 Σ (1 - n ln(1+1/n)) x^n 的收敛域", "expected_ids": ["cmc-12-final-x-07"], "tier": "easy"}
+{"id": "q14", "query": "求幂级数 Σ (-1)^{n-1} x^{2n}/(n(2n-1)) 的收敛域", "expected_ids": ["cmc-15-prelim-a-04"], "tier": "easy"}
+{"id": "q15", "query": "求微分方程 y''-(y')³=0 的通解", "expected_ids": ["cmc-07-final-x-01"], "tier": "easy"}
+{"id": "q16", "query": "求微分方程 y y''-(y')²=y² ln y 的通解", "expected_ids": ["cmc-16-final-a-07"], "tier": "easy"}
+{"id": "q17", "query": "解方程 (x²+y²+3) dy/dx = 2x(2y-x²y)", "expected_ids": ["cmc-15-prelim-a-06"], "tier": "easy"}
+{"id": "q18", "query": "设 z=f(xy,e^{x+y})，f 有二阶连续偏导，求 ∂²z/∂x∂y", "expected_ids": ["cmc-16-prelim-a-03", "cmc-16-prelim-b-04"], "tier": "easy"}
+{"id": "q19", "query": "求曲面 z=x²/2+y² 平行于平面 2x+2y-z=0 的切平面方程", "expected_ids": ["cmc-08-prelim-x-05", "cmc-01-prelim-x-03"], "tier": "easy"}
+{"id": "q20", "query": "求 f(x,y)=3xy-x³-y³+3 的所有极值之和", "expected_ids": ["cmc-14-final-x-04"], "tier": "easy"}
+{"id": "q21", "query": "求由 x³+3x²y-2y³=2 确定的隐函数 y(x) 的极值", "expected_ids": ["cmc-05-prelim-x-03"], "tier": "easy"}
+{"id": "q22", "query": "求 x-2y+3z 在球面 x²+y²+z²=1 上的最大值", "expected_ids": ["cmc-16-final-b-05"], "tier": "easy"}
+{"id": "q23", "query": "证明 a^b+b^a ≤ √a+√b ≤ a^a+b^b，其中 a,b>0 且 a+b=1", "expected_ids": ["cmc-13-final-x-10"], "tier": "easy"}
+{"id": "q24", "query": "A、B 为 n 阶正定矩阵，证明 AB 正定当且仅当 AB=BA", "expected_ids": ["cmc-05-final-x-09"], "tier": "easy"}
+{"id": "q25", "query": "A 为 n 阶可逆反对称矩阵，b 为 n 元列向量，求分块矩阵 [[A,b],[b^T,0]] 的秩", "expected_ids": ["cmc-08-final-x-03"], "tier": "easy"}
+{"id": "q26", "query": "设 A 的特征值为 λ1,...,λn，f 为多项式，求矩阵 f(A) 的行列式", "expected_ids": ["cmc-07-final-x-04"], "tier": "easy"}
+{"id": "q27", "query": "数列 a1=π/2, a_{n+1}=a_n - sin(a_n)/(n+1)，证明 {n a_n} 收敛", "expected_ids": ["cmc-12-final-x-09"], "tier": "easy"}
+{"id": "q28", "query": "数列 a1=1, a_{n+1}=a_n(n+1)/(a_n+1)，求 n! a_n 的极限", "expected_ids": ["cmc-12-prelim-x-06"], "tier": "easy"}
+{"id": "q29", "query": "x1=2021, x_n²-2(x_n+1)x_{n+1}+2021=0，证明数列收敛并求极限", "expected_ids": ["cmc-13-prelim-x-06"], "tier": "easy"}
+{"id": "q30", "query": "求曲面 x²+y²=az 与 z=2a-√(x²+y²) 所围立体的表面积", "expected_ids": ["cmc-03-final-x-05"], "tier": "easy"}
+{"id": "q31", "query": "曲线 y=x³/3+2x (0≤x≤1) 绕直线 y=4x/3 旋转，求旋转曲面面积", "expected_ids": ["cmc-08-final-x-05"], "tier": "easy"}
+{"id": "q32", "query": "求曲线的斜渐近线", "expected_ids": ["cmc-14-prelim-s1-x-07", "cmc-2024-fill-03", "cmc-2025-choice-02"], "tier": "easy"}
+{"id": "q33", "query": "正定矩阵", "expected_ids": ["cmc-05-final-x-09", "cmc-16-final-a-09", "cmc-16-final-b-10"], "tier": "easy"}
+{"id": "q34", "query": "傅里叶级数", "expected_ids": ["cmc-06-final-x-10", "cmc-07-prelim-x-04"], "tier": "easy"}
+{"id": "q35", "query": "Taylor 级数 收敛域", "expected_ids": ["cmc-16-prelim-b-07"], "tier": "easy"}
+{"id": "q36", "query": "隐函数求极值", "expected_ids": ["cmc-05-prelim-x-03"], "tier": "easy"}
+{"id": "q37", "query": "旋转曲面面积", "expected_ids": ["cmc-08-final-x-05"], "tier": "easy"}
+{"id": "h01", "query": "计算圆环区域上带指数衰减因子的二重积分", "expected_ids": ["cmc-07-final-x-02"], "tier": "hard"}
+{"id": "h02", "query": "求一个系数含对数项的幂级数的收敛域", "expected_ids": ["cmc-12-final-x-07"], "tier": "hard"}
+{"id": "h03", "query": "证明递推数列除以 n 后收敛", "expected_ids": ["cmc-12-final-x-09"], "tier": "hard"}
+{"id": "h04", "query": "求三次曲线绕斜直线旋转所得曲面的面积", "expected_ids": ["cmc-08-final-x-05"], "tier": "hard"}
+{"id": "h05", "query": "求三次隐式方程确定的函数的极值", "expected_ids": ["cmc-05-prelim-x-03"], "tier": "hard"}
+{"id": "h06", "query": "求傅里叶级数在间断点处的收敛值", "expected_ids": ["cmc-07-prelim-x-04"], "tier": "hard"}
+{"id": "h07", "query": "求单位圆盘上 r²-x-y 的二重积分", "expected_ids": ["cmc-04-final-x-09"], "tier": "hard"}
+{"id": "h08", "query": "利用对称性计算第一型曲线积分，曲线关于坐标轴对称", "expected_ids": ["cmc-16-final-a-04"], "tier": "hard"}
+{"id": "h09", "query": "两个正定矩阵的乘积保持正定的条件", "expected_ids": ["cmc-05-final-x-09"], "tier": "hard"}
+{"id": "h10", "query": "求两个旋转抛物面围成立体的表面积", "expected_ids": ["cmc-03-final-x-05"], "tier": "hard"}
