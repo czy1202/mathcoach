@@ -45,7 +45,7 @@ python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 180 个测试
+pytest                              # 211 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -69,12 +69,15 @@ python -m web.app
 
 页面能力：
 
-- Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
-- 回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
+- 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
+- 解题模式：Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
+- 解题模式：回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
 - 同一页面内支持追问：服务端保存"第一轮原题 + 最近 3 轮"，自动做上下文裁剪；
   追问时不会强制重复完整解题格式
-- 顶栏"新对话"会清空当前会话和页面消息
+- 顶栏"新对话"会清空当前会话和页面消息，并回到解题模式
 - 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏
+- 真题模式：左侧列出第 1–16 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
+  点击后右侧显示该卷全部题干；题干直接来自题库，不经过模型改写
 - 显示耗时、轮次、模型调用次数、工具调用次数、token 用量
 - 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
 - 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
@@ -90,8 +93,13 @@ python -m web.app
 后端接口：
 
 - `POST /api/ask`：请求体 `{question, session_id?}`；首次提问不传 `session_id`，
-  响应会返回服务端生成的 id，后续追问带同一个 id
+  响应会返回服务端生成的 id，后续追问带同一个 id。如果模型调用了
+  `list_past_problems`，响应会额外带上完整试卷 `paper`
 - `DELETE /api/session/{session_id}`：结束会话，"新对话"按钮会调用
+- `GET /api/papers`：第 1–16 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
+- `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
+  读取一份试卷的完整题干；`edition` 与 `year` 二选一，
+  `supplement` 省略表示不限补赛、传空串表示只要正卷
 
 解题逻辑全部复用 `agent.Agent`，Web 层只做 HTTP 包装、会话管理和展示字段整理。
 会话只存在进程内存里，服务重启后旧 id 自动失效并开始新会话；页面刷新也会开始
@@ -151,6 +159,35 @@ data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
 - 检索是 BM25 + 标签加权，没有向量和 rerank。中文按二元组切分，不依赖词典，
   对数学术语和少量抽取噪声更稳；代价是同义词（如“极值”与“最值”）匹配不到。
 - 追问（“这一步为什么”）不强制检索，也不做检索补位，避免拿追问去搜题库。
+
+### 按届浏览完整真题
+
+检索解决“找相似题”，按届浏览解决“把某一年的卷子完整拿出来”，两者走不同路径：
+
+```text
+查看真题页 ── GET /api/papers ── paper_index()：第 1-16 届目录
+     │
+     └─ 点击试卷 ── GET /api/paper?edition=…&stage=… ── list_problems()
+                                                    │
+                                                    └─ group_problems()
+                                                       按阶段 / 类别 / 补赛 / 题型分组，
+                                                       并计算缺号
+```
+
+实现要点：
+
+- **不经过模型**：题干直接从 `problems.jsonl` 读取，避免模型漏抄、改写，也避免
+  把整卷塞进上下文。
+- **去重别名展开**：建库时同一道题可能跨届重复，去重后只保留一条主记录，旧 id
+  放进 `aliases`。按届浏览时会把 `[id, *aliases]` 逐个解析回原试卷位置，否则
+  会出现“第 13 届决赛缺第 9 题”的假象。现在第 1–16 届的题号都是连续的。
+- **Agent 也能列卷**：聊天里说“我要第一届真题”时，模型调用 `list_past_problems`；
+  工具只返回题号、出处和数量，Web 层再按同一组参数重新读题库补全题干。
+- **区分语义检索和元数据过滤**：届数、阶段、类别都是确定字段，过滤即可 100%
+  命中；向量检索只解决“题目意思相近”，不能替代按届浏览。
+
+当前题库：417 道题，第 1 届 23 道、第 13 届 31 道、第 15 届 31 道、第 16 届 42 道；
+所有试卷分组均为题号连续。
 
 数据说明：
 
@@ -261,7 +298,7 @@ mathcoach/
 ├── ask.py              # 命令行一问一答入口（最小产品壳）
 ├── agent.py            # Agent 循环、超时/步数护栏、轨迹事件
 ├── llm.py              # OpenAI 兼容客户端 + StubClient（同一接口）
-├── tools.py            # sympy 验证 + 真题检索工具、注册表、run_tool 分派
+├── tools.py            # sympy 验证 + 真题检索/列卷工具、注册表、run_tool 分派
 ├── mathparse.py        # LaTeX / Unicode / 省略乘号的统一归一化
 ├── tracing.py          # TraceRecorder：逐题写 JSONL
 ├── schemas.py          # Verdict 等数据结构
@@ -271,13 +308,13 @@ mathcoach/
 │   ├── papers.py       # 试卷版式解析、去重
 │   ├── textnorm.py     # 检索归一化、二元分词、知识点标签
 │   ├── bm25.py         # 纯 Python Okapi BM25
-│   ├── index.py        # 索引加载与 BM25 + 标签混合打分
+│   ├── index.py        # 索引加载、BM25 打分、按届浏览与分组
 │   ├── evaluate.py     # 检索评测：Recall@1 / Recall@5 / MRR
 │   ├── eval_queries.jsonl  # 47 条标注查询
 │   └── search.py       # 命令行检索
 ├── data/               # 题库产物 problems.jsonl（已 gitignore）
 ├── web/
-│   ├── app.py          # FastAPI 后端：静态页 + /api/ask + /api/health
+│   ├── app.py          # FastAPI 后端：/api/ask、/api/papers、/api/paper
 │   ├── sessions.py     # 内存会话、TTL、上下文裁剪
 │   ├── test_app.py
 │   ├── test_sessions.py

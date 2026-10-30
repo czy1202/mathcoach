@@ -4,12 +4,15 @@
     python -m pytest web/test_app.py -v
 """
 
+import json
+
 import pytest
 import config
 from fastapi.testclient import TestClient
 
+import tools
 import web.app as web_app
-from llm import LLMResponse, StubClient
+from llm import LLMResponse, StubClient, ToolCall
 
 
 client = TestClient(web_app.app)
@@ -21,6 +24,43 @@ def _clear_sessions():
     web_app.SESSIONS.clear()
     yield
     web_app.SESSIONS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_index_cache():
+    """题库缓存按路径缓存；换临时题库时必须清掉。"""
+    tools._INDEX_CACHE = None
+    tools._INDEX_CACHE_PATH = None
+    yield
+    tools._INDEX_CACHE = None
+    tools._INDEX_CACHE_PATH = None
+
+
+@pytest.fixture
+def paper_env(tmp_path, monkeypatch):
+    """写一份最小题库，覆盖正卷、补赛和 2024 分题型。"""
+    path = tmp_path / "papers.jsonl"
+    rows = [
+        {"id": "cmc-01-prelim-x-01", "question": "第一届初赛第一题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": ["极限"]},
+        {"id": "cmc-01-prelim-x-02", "question": "第一届初赛第二题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": []},
+        {"id": "cmc-01-final-x-01", "question": "第一届决赛第一题", "source": "",
+         "stage": "决赛", "category": "未分类", "number": 1, "knowledge_points": []},
+        {"id": "cmc-13-prelim-x-01", "question": "第十三届初赛第一题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": []},
+        {"id": "cmc-13-prelim-s-x-02", "question": "第十三届初赛补赛第二题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": []},
+        {"id": "cmc-2024-fill-01", "question": "2024 年填空题", "source": "2024年真题",
+         "stage": "初赛", "category": "未分类", "number": 1, "year": 2024,
+         "section": "填空题", "knowledge_points": []},
+    ]
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    monkeypatch.setenv("CMC_INDEX_PATH", str(path))
+    return path
 
 
 class CountingClient:
@@ -68,6 +108,155 @@ def test_health_does_not_expose_key():
     assert data["ok"] is True
     assert "key_set" in data
     assert "OPENAI_API_KEY" not in data
+
+
+# ---------- 真题浏览 ----------
+
+def test_papers_index_lists_sixteen_editions(paper_env):
+    """“查看真题”页需要第 1-16 届的完整目录。"""
+    response = client.get("/api/papers")
+
+    assert response.status_code == 200
+    editions = response.json()["editions"]
+    assert [item["edition"] for item in editions] == list(range(1, 17))
+    assert editions[0]["total"] == 3
+    assert [paper["label"] for paper in editions[0]["papers"]] == ["初赛", "决赛"]
+    assert editions[1]["total"] == 0
+
+
+def test_get_paper_returns_full_questions(paper_env):
+    """试卷接口直接返回题库原文，不经过模型改写。"""
+    response = client.get("/api/paper", params={
+        "edition": 1,
+        "stage": "初赛",
+        "category": "未分类",
+        "supplement": "",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 2
+    assert len(data["groups"]) == 1
+    group = data["groups"][0]
+    assert group["label"] == "初赛"
+    assert group["numbers"] == [1, 2]
+    assert group["complete"] is True
+    assert group["problems"][0]["question"] == "第一届初赛第一题"
+    assert group["problems"][0]["knowledge_points"] == ["极限"]
+
+
+def test_get_paper_filters_supplement(paper_env):
+    regular = client.get("/api/paper", params={
+        "edition": 13,
+        "stage": "初赛",
+        "supplement": "",
+    }).json()
+    supplement = client.get("/api/paper", params={
+        "edition": 13,
+        "stage": "初赛",
+        "supplement": "补赛",
+    }).json()
+
+    assert regular["count"] == 1
+    assert regular["groups"][0]["problems"][0]["supplement"] == ""
+    assert supplement["count"] == 1
+    assert supplement["groups"][0]["problems"][0]["supplement"] == "补赛"
+
+
+def test_get_paper_filters_section_by_year(paper_env):
+    response = client.get("/api/paper", params={"year": 2024, "section": "填空题"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["count"] == 1
+    assert data["groups"][0]["section"] == "填空题"
+
+
+def test_get_paper_requires_edition_or_year():
+    response = client.get("/api/paper")
+
+    assert response.status_code == 400
+    assert "届数或年份" in response.json()["detail"]
+
+
+def test_get_paper_returns_404_for_unknown_edition(paper_env):
+    response = client.get("/api/paper", params={"edition": 99})
+
+    assert response.status_code == 404
+
+
+def test_paper_endpoints_return_503_without_index(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(tmp_path / "missing.jsonl"))
+
+    assert client.get("/api/papers").status_code == 503
+    assert client.get("/api/paper", params={"edition": 1}).status_code == 503
+
+
+def test_collect_paper_rebuilds_from_tool_args(paper_env):
+    """Agent 只拿到题号时，Web 层按同一组参数重新读题库补全题干。"""
+    events = [{
+        "type": "tool",
+        "name": "list_past_problems",
+        "args": {"edition": "第一届"},
+    }]
+    payload = web_app.collect_paper(events)
+
+    assert payload["edition"] == 1
+    assert payload["count"] == 3
+    assert payload["groups"][0]["problems"][0]["question"] == "第一届初赛第一题"
+
+
+def test_collect_paper_ignores_unusable_events(paper_env):
+    assert web_app.collect_paper([]) is None
+    assert web_app.collect_paper([{
+        "type": "tool",
+        "name": "list_past_problems",
+        "args": {},
+    }]) is None
+    assert web_app.collect_paper([{
+        "type": "tool",
+        "name": "search_past_problems",
+        "args": {"query": "极限"},
+    }]) is None
+
+
+class PaperClient:
+    """第一轮调用列卷工具，第二轮给出简短说明。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="list_past_problems",
+                        args={"edition": "第一届"},
+                        id="call_1",
+                    )
+                ],
+            )
+        return LLMResponse(content="找到 3 道题，按初赛和决赛分组。")
+
+
+def test_ask_returns_paper_instead_of_answer_card(paper_env, monkeypatch, tmp_path):
+    """“我要第一届真题”应返回完整试卷，而不是把正文数字当成最终答案。"""
+    monkeypatch.setattr(web_app, "_client", PaperClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post("/api/ask", json={"question": "我要第一届真题"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["paper"]["edition"] == 1
+    assert data["paper"]["count"] == 3
+    assert data["paper"]["groups"][0]["problems"][0]["question"] == "第一届初赛第一题"
+    assert data["final_answer"] is None
+    assert data["related_problems"] == []
+    assert [tool["name"] for tool in data["tools"]] == ["list_past_problems"]
 
 
 # ---------- 求解接口 ----------

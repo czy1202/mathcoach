@@ -26,7 +26,12 @@ import config
 from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
-from tools import index_available, search_past_problems
+from tools import (
+    index_available,
+    load_problem_index,
+    parse_edition,
+    search_past_problems,
+)
 from tracing import TraceRecorder, new_trace_file
 from web.sessions import SessionStore
 
@@ -112,6 +117,66 @@ class RelatedProblem(BaseModel):
     score: float = 0.0
 
 
+class PaperProblem(BaseModel):
+    """一份试卷中的一道题；题干来自题库，不由模型复述。"""
+
+    id: str = ""
+    paper_id: str = ""
+    edition: int | None = None
+    year: int | None = None
+    stage: str = ""
+    category: str = ""
+    supplement: str = ""
+    section: str = ""
+    number: int = 0
+    source: str = ""
+    question: str = ""
+    knowledge_points: list[str] = Field(default_factory=list)
+
+
+class PaperGroup(BaseModel):
+    stage: str = ""
+    category: str = ""
+    supplement: str = ""
+    section: str = ""
+    label: str = ""
+    count: int = 0
+    numbers: list[int] = Field(default_factory=list)
+    missing: list[int] = Field(default_factory=list)
+    complete: bool = True
+    problems: list[PaperProblem] = Field(default_factory=list)
+
+
+class PaperSummary(BaseModel):
+    stage: str = ""
+    category: str = ""
+    supplement: str = ""
+    section: str = ""
+    label: str = ""
+    count: int = 0
+    numbers: list[int] = Field(default_factory=list)
+    missing: list[int] = Field(default_factory=list)
+    complete: bool = True
+
+
+class PaperEdition(BaseModel):
+    edition: int
+    label: str = ""
+    total: int = 0
+    papers: list[PaperSummary] = Field(default_factory=list)
+
+
+class PaperIndexResponse(BaseModel):
+    editions: list[PaperEdition] = Field(default_factory=list)
+
+
+class PaperResponse(BaseModel):
+    edition: int | None = None
+    year: int | None = None
+    count: int = 0
+    groups: list[PaperGroup] = Field(default_factory=list)
+
+
 class AskResponse(BaseModel):
     answer: str
     display_answer: str
@@ -129,6 +194,7 @@ class AskResponse(BaseModel):
     steps: list[StepInfo] = Field(default_factory=list)
     tools: list[ToolInfo] = Field(default_factory=list)
     related_problems: list[RelatedProblem] = Field(default_factory=list)
+    paper: PaperResponse | None = None
 
 
 # ---------- 纯函数 ----------
@@ -248,6 +314,75 @@ def collect_related(
     return hits[:limit]
 
 
+def build_paper_payload(
+    *,
+    edition: int | None = None,
+    year: int | None = None,
+    stage: str | None = None,
+    category: str | None = None,
+    supplement: str | None = None,
+    section: str | None = None,
+) -> dict | None:
+    """按条件读取完整试卷；没有匹配题目时返回 None。"""
+    if not index_available():
+        return None
+    index = load_problem_index()
+    entries = index.list_problems(
+        edition=edition,
+        year=year,
+        stage=stage or None,
+        category=category or None,
+        supplement=supplement,
+    )
+    if section:
+        # 2024/2025 的卷子按选择题/填空题/解答题分开浏览
+        entries = [entry for entry in entries if entry.get("section") == section]
+    if not entries:
+        return None
+    return {
+        "edition": edition,
+        "year": year,
+        "count": len(entries),
+        "groups": index.group_problems(entries),
+    }
+
+
+def collect_paper(events: list[dict]) -> dict | None:
+    """从轨迹里的 list_past_problems 调用还原完整试卷。
+
+    工具结果只带题号和出处；这里按同一组参数重新读题库，返回完整题干。
+    这样模型既不需要把整卷抄进上下文，Web 端也不会展示被截断的文本。
+    """
+    for event in reversed(events):
+        if event.get("type") != "tool" or event.get("name") != "list_past_problems":
+            continue
+
+        args = event.get("args") or {}
+        try:
+            edition = parse_edition(args.get("edition"))
+            raw_year = args.get("year")
+            year = None
+            if raw_year not in (None, ""):
+                match = re.search(r"\d{4}", str(raw_year))
+                year = int(match.group(0)) if match else None
+            if edition is None and year is None:
+                continue
+
+            payload = build_paper_payload(
+                edition=edition,
+                year=year,
+                stage=args.get("stage"),
+                category=args.get("category"),
+                supplement=args.get("supplement"),
+            )
+        except Exception:
+            payload = None
+
+        if payload:
+            return payload
+    return None
+
+
 def collect_tools(events: list[dict], max_result: int = 500) -> list[dict]:
     """从 trace 事件里提取工具调用摘要。"""
     tools = []
@@ -280,6 +415,61 @@ def health() -> dict:
         "ok": True,
         "model": config.OPENAI_MODEL,
         "key_set": bool(config.OPENAI_API_KEY.strip()),
+        "papers_available": index_available(),
+    }
+
+
+@app.get("/api/papers", response_model=PaperIndexResponse)
+def list_papers() -> dict:
+    """返回第 1-16 届的试卷目录，供“查看真题”页渲染选项条。"""
+    if not index_available():
+        raise HTTPException(
+            status_code=503,
+            detail="题库未构建，请先在项目根目录运行 python -m rag.build。",
+        )
+    return {"editions": load_problem_index().paper_index()}
+
+
+@app.get("/api/paper", response_model=PaperResponse)
+def get_paper(
+    edition: int | None = None,
+    year: int | None = None,
+    stage: str | None = None,
+    category: str | None = None,
+    supplement: str | None = None,
+    section: str | None = None,
+) -> dict:
+    """返回一份试卷的全部题目。
+
+    supplement 省略表示不限补赛；传空字符串表示只要正卷。
+    这个接口不调用模型，题干直接来自题库，因此不会漏题或改写。
+    """
+    if edition is None and year is None:
+        raise HTTPException(status_code=400, detail="请指定届数或年份。")
+    if not index_available():
+        raise HTTPException(
+            status_code=503,
+            detail="题库未构建，请先在项目根目录运行 python -m rag.build。",
+        )
+
+    index = load_problem_index()
+    entries = index.list_problems(
+        edition=edition,
+        year=year,
+        stage=stage or None,
+        category=category or None,
+        supplement=supplement,
+    )
+    if section:
+        entries = [entry for entry in entries if entry.get("section") == section]
+    if not entries:
+        raise HTTPException(status_code=404, detail="没有找到符合条件的真题。")
+
+    return {
+        "edition": edition,
+        "year": year,
+        "count": len(entries),
+        "groups": index.group_problems(entries),
     }
 
 
@@ -345,10 +535,11 @@ def ask(req: AskRequest) -> AskResponse:
                 history_chars=sum(len(m["content"]) for m in history),
             )
 
-            # 追问回答通常没有固定答案行，关掉兜底，避免把解释误当答案
+            # 列真题不是解题，不要把正文里的数字误当成最终答案
+            paper = collect_paper(tracer.events) if retrieval else None
             final_answer = extract_final_answer(
                 answer,
-                allow_fallback=not follow_up,
+                allow_fallback=not follow_up and paper is None,
             )
             error = tracer.error
             if error is None and answer.startswith("错误："):
@@ -375,12 +566,13 @@ def ask(req: AskRequest) -> AskResponse:
                 trace_file=trace_path.name,
                 steps=collect_steps(tracer.events),
                 tools=collect_tools(tracer.events),
-                related_problems=collect_related(
+                related_problems=[] if paper else collect_related(
                     tracer.events,
                     question,
                     enabled=retrieval,
                     follow_up=follow_up,
                 ),
+                paper=paper,
             )
         finally:
             session.lock.release()

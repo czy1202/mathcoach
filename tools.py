@@ -9,6 +9,7 @@ v1 阶段输入来自本地自测，暂时接受这个风险；后期接入真�
 
 import json
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,7 @@ def index_available() -> bool:
     return index_path().exists()
 
 
-def _load_problem_index():
+def load_problem_index():
     """懒加载题库索引，避免未使用 RAG 的命令行也读一遍 JSONL。"""
     global _INDEX_CACHE, _INDEX_CACHE_PATH
 
@@ -108,7 +109,7 @@ def search_past_problems(query: str, k: int | str = 3) -> str:
     except (TypeError, ValueError):
         limit = 3
 
-    index = _load_problem_index()
+    index = load_problem_index()
     hits = index.search(query, k=limit)
     results = [
         {
@@ -124,6 +125,127 @@ def search_past_problems(query: str, k: int | str = 3) -> str:
     return json.dumps(results, ensure_ascii=False)
 
 
+_CN_EDITION_DIGITS = {
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def parse_edition(value: Any) -> int | None:
+    """把 1 / "1" / "第一届" / "十六届" 统一成整数届数。"""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"无法识别届数：{value!r}")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+
+    text = str(value).strip().replace("第", "").replace("届", "").strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+
+    # 兼容“第1届初赛”这种把阶段也带进来的写法
+    digits = re.search(r"\d+", text)
+    if digits:
+        return int(digits.group(0))
+
+    if text == "十":
+        return 10
+    if "十" in text:
+        tens, ones = text.split("十", 1)
+        return (_CN_EDITION_DIGITS.get(tens, 1) if tens else 1) * 10 + (
+            _CN_EDITION_DIGITS.get(ones, 0) if ones else 0
+        )
+    if text in _CN_EDITION_DIGITS:
+        return _CN_EDITION_DIGITS[text]
+    raise ValueError(f"无法识别届数：{value!r}")
+
+
+def _parse_year(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, int):
+        return value
+    match = re.search(r"(\d{4})", str(value))
+    if not match:
+        raise ValueError(f"无法识别年份：{value!r}")
+    return int(match.group(1))
+
+
+def list_past_problems(
+    edition: Any = None,
+    year: Any = None,
+    stage: Any = None,
+    category: Any = None,
+    supplement: Any = None,
+) -> str:
+    """列出某一届/某一年真题的全部题目（返回题号、出处和数量）。
+
+    题干不放进工具结果：它只需要让模型知道“找到了几道、分布如何”，
+    完整题干由 Web 端根据同一组参数直接读取题库并渲染，避免模型复述时
+    漏题或改题，也避免把整卷塞进模型上下文。
+    """
+    try:
+        edition_num = parse_edition(edition)
+        year_num = _parse_year(year)
+    except (TypeError, ValueError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    if edition_num is None and year_num is None:
+        return json.dumps({
+            "error": "请提供届数（例如 1）或年份（例如 2024）。",
+            "available_editions": list(range(1, 17)),
+        }, ensure_ascii=False)
+
+    stage_text = str(stage).strip() if stage not in (None, "") else None
+    category_text = str(category).strip() if category not in (None, "") else None
+    supplement_text = (
+        str(supplement).strip() if supplement is not None else None
+    )
+
+    index = load_problem_index()
+    entries = index.list_problems(
+        edition=edition_num,
+        year=year_num,
+        stage=stage_text,
+        category=category_text,
+        supplement=supplement_text,
+    )
+    if not entries:
+        return json.dumps({
+            "error": "没有找到符合条件的真题。",
+            "edition": edition_num,
+            "year": year_num,
+        }, ensure_ascii=False)
+
+    groups = index.group_problems(entries)
+    compact = [
+        {
+            "stage": group["stage"],
+            "category": group["category"],
+            "supplement": group["supplement"],
+            "section": group["section"],
+            "label": group["label"],
+            "count": group["count"],
+            "numbers": group["numbers"],
+            "missing": group["missing"],
+            "complete": group["complete"],
+            "sources": [problem["source"] for problem in group["problems"]],
+        }
+        for group in groups
+    ]
+    return json.dumps({
+        "edition": edition_num,
+        "year": year_num,
+        "count": len(entries),
+        "groups": compact,
+    }, ensure_ascii=False)
+
+
 RETRIEVAL_TOOLS: dict[str, dict] = {
     "search_past_problems": {
         "函数": search_past_problems,
@@ -136,6 +258,22 @@ RETRIEVAL_TOOLS: dict[str, dict] = {
             "k": "返回条数，字符串形式的整数，默认 3，最多 5",
         },
         "必填": ["query"],
+    },
+    "list_past_problems": {
+        "函数": list_past_problems,
+        "描述": (
+            "列出某一届或某一年 CMC 真题的全部题目，返回题号、出处和数量。"
+            "用户明确要求查看整套试卷时使用；不要用于查找相似题，"
+            "也不要在用户只要求解答某一道题时使用。"
+        ),
+        "参数说明": {
+            "edition": "届数，例如 1、16 或“第一届”；与 year 二选一",
+            "year": "年份，例如 2024；与 edition 二选一",
+            "stage": "可选，初赛 / 决赛",
+            "category": "可选，A / B / 未分类",
+            "supplement": "可选，补赛 / 补赛1 / 补赛2",
+        },
+        "必填": [],
     },
 }
 

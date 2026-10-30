@@ -7,13 +7,13 @@
   <title>mathcoach · 数学竞赛解题助手</title>
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
   <link rel="stylesheet" href="/static/vendor/markdown-it-texmath/texmath.css">
-  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/styles.css?v=20261030">
 </head>
 <body>
   <div class="page">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">∑</span>
+        <button type="button" class="brand-mark" id="home-btn" title="返回模式选择" aria-label="返回模式选择">∑</button>
         <div class="brand-text">
           <h1>mathcoach</h1>
           <p>CMC / 考研数学 · 会调用工具验证的解题助手</p>
@@ -28,7 +28,32 @@
       </div>
     </header>
 
-    <main class="chat" id="chat">
+    <section class="mode-gate" id="mode-gate">
+      <div class="mode-gate-inner">
+        <p class="eyebrow">MATH · AGENT</p>
+        <h2>今天想做什么？</h2>
+        <p class="mode-gate-lead">
+          可以让 Agent 解一道题，也可以按届浏览 CMC 历年真题。
+          两种模式互不打扰，随时点击左上角 ∑ 回来切换。
+        </p>
+        <div class="mode-cards">
+          <button type="button" class="mode-card" data-mode="solve">
+            <span class="mode-card-icon">∑</span>
+            <span class="mode-card-title">问题目</span>
+            <span class="mode-card-text">输入题目，Agent 会给出知识点、思路、完整步骤，并用 sympy 验证关键计算。</span>
+            <span class="mode-card-arrow">开始解题 →</span>
+          </button>
+          <button type="button" class="mode-card" data-mode="papers">
+            <span class="mode-card-icon">卷</span>
+            <span class="mode-card-title">查看真题</span>
+            <span class="mode-card-text">按第 1–16 届浏览初赛、决赛、A/B 类和补赛，点击试卷即可看完整题干。</span>
+            <span class="mode-card-arrow">打开题库 →</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <main class="chat" id="chat" hidden>
       <section class="welcome" id="welcome">
         <p class="eyebrow">MATH · AGENT</p>
         <h2>把题目交给我</h2>
@@ -46,7 +71,30 @@
       </section>
     </main>
 
-    <footer class="composer">
+    <section class="papers-view" id="papers-view" hidden>
+      <div class="papers-shell">
+        <aside class="papers-sidebar">
+          <div class="papers-head">
+            <p class="eyebrow">CMC · ARCHIVE</p>
+            <h2>历年真题</h2>
+            <p class="papers-sub">第 1–16 届 · 点击试卷查看完整题目</p>
+          </div>
+          <div class="edition-list" id="edition-list">
+            <p class="papers-loading">正在加载题库…</p>
+          </div>
+        </aside>
+        <section class="paper-detail" id="paper-detail">
+          <div class="paper-placeholder" id="paper-placeholder">
+            <div class="paper-placeholder-mark">∑</div>
+            <h3>选择一份试卷</h3>
+            <p>从左侧选择届数和初赛/决赛，完整题干会显示在这里。</p>
+          </div>
+          <div class="paper-content" id="paper-content" hidden></div>
+        </section>
+      </div>
+    </section>
+
+    <footer class="composer" hidden>
       <form id="form" autocomplete="off">
         <textarea
           id="question"
@@ -78,6 +126,6 @@
     delete window.exports;
   </script>
   <script src="/static/vendor/dompurify/purify.min.js"></script>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20261030"></script>
 </body>
 </html>

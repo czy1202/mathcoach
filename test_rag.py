@@ -14,7 +14,12 @@ from llm import LLMResponse
 from rag.bm25 import BM25
 from rag.evaluate import evaluate, load_queries
 from rag.index import ProblemIndex
-from rag.papers import dedupe, parse_recent_text, parse_retypeset_text
+from rag.papers import (
+    dedupe,
+    parse_problem_id,
+    parse_recent_text,
+    parse_retypeset_text,
+)
 from rag.textnorm import detect_tags, normalize_for_search, tokenize
 from web.app import _parse_hits, collect_related
 
@@ -222,6 +227,106 @@ def test_tag_weight_zero_falls_back_to_bm25():
     assert hits[0].score == hits[0].bm25
 
 
+# ---------- 试卷浏览 ----------
+
+def test_parse_problem_id_restores_paper_position():
+    """题目 id 能还原届数、阶段、类别、补赛和题号。"""
+    assert parse_problem_id("cmc-01-prelim-x-01") == {
+        "edition": 1,
+        "stage": "初赛",
+        "category": "未分类",
+        "supplement": "",
+        "number": 1,
+    }
+    assert parse_problem_id("cmc-13-prelim-s-x-09")["supplement"] == "补赛"
+    assert parse_problem_id("cmc-13-prelim-s2-x-09")["supplement"] == "补赛2"
+    assert parse_problem_id("cmc-16-final-b-11")["category"] == "B"
+
+
+def test_parse_problem_id_rejects_unknown_formats():
+    assert parse_problem_id("p1") is None
+    assert parse_problem_id("cmc-2024-fill-01") is None
+    assert parse_problem_id("") is None
+    assert parse_problem_id(None) is None
+
+
+def _paper_problem(pid, question, *, tags=None, aliases=None):
+    return {
+        "id": pid,
+        "question": question,
+        "source": "",
+        "stage": "初赛",
+        "category": "A",
+        "number": 1,
+        "knowledge_points": tags or [],
+        "aliases": list(aliases or []),
+    }
+
+
+def _paper_index() -> ProblemIndex:
+    return ProblemIndex([
+        _paper_problem("cmc-13-final-x-01", "第一题"),
+        _paper_problem(
+            "cmc-12-final-x-02",
+            "第二题（与第 13 届重复）",
+            tags=["极限"],
+            aliases=["cmc-13-final-x-02"],
+        ),
+        _paper_problem("cmc-13-final-x-03", "第三题"),
+        _paper_problem("cmc-13-prelim-x-01", "初赛正卷第一题"),
+        _paper_problem("cmc-13-prelim-s-x-02", "初赛补赛第二题"),
+    ])
+
+
+def test_list_problems_expands_deduped_aliases():
+    """去重时合并到别届的题，仍应出现在它原本所属的试卷里。"""
+    entries = _paper_index().list_problems(edition=13, stage="决赛")
+    assert [entry["number"] for entry in entries] == [1, 2, 3]
+    assert [entry["paper_id"] for entry in entries] == [
+        "cmc-13-final-x-01",
+        "cmc-13-final-x-02",
+        "cmc-13-final-x-03",
+    ]
+    # 别名展开后题号连续，不应把被合并的第 2 题误报为缺失
+    group = _paper_index().group_problems(entries)[0]
+    assert group["missing"] == []
+    assert group["complete"] is True
+
+
+def test_list_problems_filters_regular_and_supplement():
+    index = _paper_index()
+    regular = index.list_problems(edition=13, stage="初赛", supplement="")
+    supplement = index.list_problems(edition=13, stage="初赛", supplement="补赛")
+    both = index.list_problems(edition=13, stage="初赛")
+
+    assert [entry["number"] for entry in regular] == [1]
+    assert [entry["number"] for entry in supplement] == [2]
+    assert len(both) == 2
+
+
+def test_group_problems_reports_missing_numbers():
+    entries = [
+        {"stage": "初赛", "category": "未分类", "supplement": "",
+         "section": "", "number": 1, "paper_id": "a"},
+        {"stage": "初赛", "category": "未分类", "supplement": "",
+         "section": "", "number": 3, "paper_id": "b"},
+    ]
+    group = ProblemIndex.group_problems(entries)[0]
+
+    assert group["numbers"] == [1, 3]
+    assert group["missing"] == [2]
+    assert group["complete"] is False
+
+
+def test_paper_index_always_covers_editions_1_to_16():
+    editions = _paper_index().paper_index()
+    assert [item["edition"] for item in editions] == list(range(1, 17))
+    # 样例题库只有第 13 届，其余届仍应返回空目录而不是报错
+    assert editions[12]["total"] == 5
+    assert editions[0]["total"] == 0
+    assert editions[0]["papers"] == []
+
+
 # ---------- 检索评测 ----------
 
 def test_evaluate_maps_aliases_and_groups_tiers():
@@ -317,6 +422,90 @@ def test_index_available_reflects_env(tmp_path, monkeypatch):
     assert tools.index_available() is True
 
 
+# ---------- 试卷浏览工具 ----------
+
+def _write_paper_index(tmp_path):
+    path = tmp_path / "papers.jsonl"
+    problems = [
+        {"id": "cmc-01-prelim-x-01", "question": "第一届初赛第一题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": []},
+        {"id": "cmc-01-prelim-x-02", "question": "第一届初赛第二题", "source": "",
+         "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": []},
+        {"id": "cmc-01-final-x-01", "question": "第一届决赛第一题", "source": "",
+         "stage": "决赛", "category": "未分类", "number": 1, "knowledge_points": []},
+        {"id": "cmc-2024-fill-01", "question": "2024 年填空题", "source": "2024年真题",
+         "stage": "初赛", "category": "未分类", "number": 1, "year": 2024,
+         "section": "填空题", "knowledge_points": []},
+    ]
+    with open(path, "w", encoding="utf-8") as handle:
+        for problem in problems:
+            handle.write(json.dumps(problem, ensure_ascii=False) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (1, 1),
+        ("16", 16),
+        ("第一届", 1),
+        ("第十六届", 16),
+        ("第3届初赛", 3),
+        ("十", 10),
+        ("十二", 12),
+        (None, None),
+        ("", None),
+    ],
+)
+def test_parse_edition_accepts_common_forms(value, expected):
+    assert tools.parse_edition(value) == expected
+
+
+def test_parse_edition_rejects_bool():
+    """True 会被当成 1，届数工具里应明确拒绝。"""
+    with pytest.raises(ValueError):
+        tools.parse_edition(True)
+
+
+def test_list_past_problems_returns_counts_without_question_text(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.list_past_problems(edition="第一届"))
+
+    assert data["edition"] == 1
+    assert data["count"] == 3
+    assert [group["label"] for group in data["groups"]] == ["初赛", "决赛"]
+    assert data["groups"][0]["numbers"] == [1, 2]
+    assert data["groups"][0]["complete"] is True
+    # 工具结果只带题号和出处，完整题干由 Web 端另行读取
+    assert "question" not in data["groups"][0]
+
+
+def test_list_past_problems_filters_by_year_and_section(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.list_past_problems(year="2024 年"))
+
+    assert data["year"] == 2024
+    assert data["count"] == 1
+    assert data["groups"][0]["section"] == "填空题"
+
+
+def test_list_past_problems_requires_edition_or_year(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.list_past_problems())
+
+    assert "error" in data
+    assert data["available_editions"] == list(range(1, 17))
+
+
+def test_list_past_problems_reports_empty_result(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.list_past_problems(edition=9))
+
+    assert "没有找到" in data["error"]
+
+
 # ---------- Agent 接线 ----------
 
 class _RecordingClient:
@@ -356,6 +545,21 @@ def test_retrieval_tool_only_requires_query():
         if item["function"]["name"] == "search_past_problems"
     )
     assert schema["function"]["parameters"]["required"] == ["query"]
+
+
+def test_agent_exposes_paper_listing_tool_when_enabled():
+    """查看整卷走独立工具，且所有参数都可选（届数/年份二选一）。"""
+    client = _RecordingClient()
+    Agent(client=client, retrieval=True).run("我要第一届真题")
+
+    schema = next(
+        item for item in client.tools_seen[0]
+        if item["function"]["name"] == "list_past_problems"
+    )
+    assert schema["function"]["parameters"]["required"] == []
+    system_prompt = client.messages_seen[0][0]["content"]
+    assert "list_past_problems" in system_prompt
+    assert "不要逐题解答" in system_prompt
 
 
 # ---------- Web 层：相关真题 ----------

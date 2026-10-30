@@ -31,6 +31,11 @@ _HEADER_RE = re.compile(
     re.MULTILINE,
 )
 _QUESTION_RE = re.compile(r"^\s*题目\s*(\d+)\s*$", re.MULTILINE)
+# 题目 id 里带了届数、阶段、类别、补赛和题号，去重后可以据此还原
+# “这道题还出现在哪一届的哪个位置”。
+_PROBLEM_ID_RE = re.compile(
+    r"^cmc-(\d{2})-(prelim|final)(-s\d*)?-([abx])-(\d{2})$"
+)
 
 _RECENT_SECTION_RE = re.compile(
     r"^\s*([一二三])、\s*(填空题|选择题|解答题)[^\n]*$",
@@ -108,6 +113,43 @@ def _make_source(
         parts.append(f"{category}类")
     parts.append(f"第{number}题")
     return " ".join(parts)
+
+
+def make_source(
+    edition: int,
+    stage: str,
+    category: str,
+    supplement: str,
+    number: int,
+) -> str:
+    """按试卷归属生成出处，供去重后的别名还原使用。"""
+    return _make_source(edition, stage, category, supplement, number)
+
+
+def parse_problem_id(problem_id: str) -> dict | None:
+    """从题目 id 解析出它属于哪一份试卷。
+
+    ``cmc-13-final-x-09`` -> 第 13 届决赛第 9 题。
+    去重时被合并的题会保留在 ``aliases`` 里，用这个函数可以把它
+    还原到原试卷，否则按届数浏览时会出现“缺第 9 题”的假象。
+    """
+    match = _PROBLEM_ID_RE.match(str(problem_id or ""))
+    if not match:
+        return None
+
+    supplement_code = match.group(3) or ""
+    supplement = ""
+    if supplement_code:
+        suffix = supplement_code[2:]
+        supplement = f"补赛{suffix}" if suffix else "补赛"
+
+    return {
+        "edition": int(match.group(1)),
+        "stage": "初赛" if match.group(2) == "prelim" else "决赛",
+        "category": {"a": "A", "b": "B", "x": "未分类"}[match.group(4)],
+        "supplement": supplement,
+        "number": int(match.group(5)),
+    }
 
 
 def parse_retypeset_text(
