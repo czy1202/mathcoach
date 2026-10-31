@@ -95,11 +95,111 @@ def load_problem_index():
         return _INDEX_CACHE
 
 
+# ---------- 向量检索与混合检索 ----------
+
+RETRIEVER_MODES = {"auto", "bm25", "vector", "hybrid"}
+
+_VECTOR_LOCK = threading.RLock()
+_VECTOR_CACHE: Any = None
+_VECTOR_CACHE_PATH: Path | None = None
+_VECTOR_CACHE_INDEX_PATH: Path | None = None
+
+
+def embeddings_path() -> Path:
+    """向量缓存位置，可用 CMC_EMBEDDINGS_PATH 覆盖。"""
+    return Path(
+        os.environ.get("CMC_EMBEDDINGS_PATH", "data/processed/embeddings.npz")
+    )
+
+
+def retriever_mode() -> str:
+    """当前检索策略：auto / bm25 / vector / hybrid。"""
+    value = os.environ.get("CMC_RETRIEVER", "auto").strip().lower()
+    return value if value in RETRIEVER_MODES else "auto"
+
+
+def vector_available() -> bool:
+    """向量缓存文件是否存在（不校验模型，校验在加载时做）。"""
+    return embeddings_path().exists()
+
+
+def load_vector_index():
+    """懒加载并缓存向量索引，供工具层和 Web 健康检查复用。"""
+    global _VECTOR_CACHE, _VECTOR_CACHE_PATH, _VECTOR_CACHE_INDEX_PATH
+
+    path = embeddings_path()
+    source = index_path()
+    with _VECTOR_LOCK:
+        if (
+            _VECTOR_CACHE is not None
+            and _VECTOR_CACHE_PATH == path
+            and _VECTOR_CACHE_INDEX_PATH == source
+        ):
+            return _VECTOR_CACHE
+        if not path.exists():
+            raise FileNotFoundError(
+                f"向量缓存不存在：{path}。请先运行 python -m rag.build_embeddings"
+            )
+        from rag.vector import VectorIndex
+
+        index = load_problem_index()
+        _VECTOR_CACHE = VectorIndex.load_for(index, path)
+        _VECTOR_CACHE_PATH = path
+        _VECTOR_CACHE_INDEX_PATH = source
+        return _VECTOR_CACHE
+
+
+def clear_vector_cache() -> None:
+    """清掉工具层缓存（测试或重建向量后调用）。"""
+    global _VECTOR_CACHE, _VECTOR_CACHE_PATH, _VECTOR_CACHE_INDEX_PATH
+    with _VECTOR_LOCK:
+        _VECTOR_CACHE = None
+        _VECTOR_CACHE_PATH = None
+        _VECTOR_CACHE_INDEX_PATH = None
+
+
+def retriever_status() -> dict:
+    """给 /api/health 用的检索状态，不加载模型，也不返回密钥。"""
+    return {
+        "retriever": retriever_mode(),
+        "vector_available": vector_available(),
+        "embedding_model": os.environ.get(
+            "CMC_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"
+        ),
+    }
+
+
+def _search_hits(query: str, limit: int):
+    """按 CMC_RETRIEVER 选择检索路径，返回 (hits, 实际使用的策略)。"""
+    index = load_problem_index()
+    mode = retriever_mode()
+    if mode == "bm25":
+        return index.search(query, k=limit), "bm25"
+
+    try:
+        vector_index = load_vector_index()
+        if mode == "vector":
+            from rag.hybrid import vector_search
+
+            return vector_search(index, vector_index, query, k=limit), "vector"
+
+        # auto 和显式 hybrid 都走 RRF；auto 在向量不可用时回退 BM25
+        from rag.hybrid import hybrid_search
+
+        return hybrid_search(index, vector_index, query, k=limit), "hybrid"
+    except (FileNotFoundError, ImportError, RuntimeError, ValueError):
+        # 模型未下载、依赖缺失、缓存过期都不应该让解题主流程失败
+        return index.search(query, k=limit), "bm25"
+
+
 def search_past_problems(query: str, k: int | str = 3) -> str:
     """检索 CMC 历年真题，返回精简 JSON。
 
     只返回题干和出处，不返回解答：工具结果会进模型上下文，需要控制体积；
     完整解答留给后续的 get_problem_detail（暂未实现）。
+
+    默认 ``CMC_RETRIEVER=auto``：向量缓存可用时用 BM25 + BGE + RRF，
+    否则自动退回 BM25；也可以显式设成 bm25 / vector / hybrid。
     """
     if not isinstance(query, str) or not query.strip():
         return "[]"
@@ -109,8 +209,7 @@ def search_past_problems(query: str, k: int | str = 3) -> str:
     except (TypeError, ValueError):
         limit = 3
 
-    index = load_problem_index()
-    hits = index.search(query, k=limit)
+    hits, used = _search_hits(query, limit)
     results = [
         {
             "id": hit.problem["id"],
@@ -120,7 +219,8 @@ def search_past_problems(query: str, k: int | str = 3) -> str:
             "score": round(hit.score, 3),
         }
         for hit in hits
-        if hit.score > 0
+        # 向量余弦可能为负；只保留真正的正相关结果，BM25/RRF 本来就只返回正分
+        if used == "vector" or hit.score > 0
     ]
     return json.dumps(results, ensure_ascii=False)
 

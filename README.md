@@ -16,11 +16,11 @@
   4. 最后一行固定为 `最终答案：<答案>`
 - 工具：sympy（求导 / 积分 / 极限 / 化简 / 解方程）；CMC 非数学类历年真题检索
 - 真题推荐：回答后附“相关真题”卡片（出处 + 题干 + 知识点），检索结果不作为
-  本题的条件
+  本题的条件；检索用 BM25 + BGE 向量 + RRF
 - 拒答：题干信息不全，或题目本身是未解决猜想时，说明原因并请用户补充，
   不引入假设硬答
 - 成功标准：24 道评测题（20 道求解 + 4 道应拒答），总通过率 ≥ 70%
-- 暂不实现：拍照识题、向量检索与 rerank
+- 暂不实现：拍照识题、cross-encoder rerank
 
 ## 快速开始
 
@@ -39,13 +39,15 @@ python ask.py                              # 连续提问模式，exit 退出
 python ask.py --stub "1+1"                 # 离线假模型，不联网
 python -m web.app                          # 本地 Web 版，打开 http://127.0.0.1:8000
 python -m rag.build                        # 从本地真题 PDF 构建题库（需要先有 PDF）
-python -m rag.search "二重积分" --top 5     # 命令行检索真题
-python -m rag.evaluate --misses             # 检索评测：Recall@k / MRR
+python -m rag.build_embeddings             # 构建 BGE 向量缓存（首次会下载模型）
+python -m rag.search "二重积分" --top 5     # 命令行检索真题（默认混合检索）
+python -m rag.search "二重积分" --retriever bm25   # 只跑 BM25，便于对照
+python -m rag.evaluate --misses             # 检索评测：BM25 / BGE / RRF
 python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 211 个测试
+pytest                              # 229 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -100,6 +102,8 @@ python -m web.app
 - `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
   读取一份试卷的完整题干；`edition` 与 `year` 二选一，
   `supplement` 省略表示不限补赛、传空串表示只要正卷
+- `GET /api/health`：除模型状态外，还返回 `retriever`（auto/bm25/vector/hybrid）、
+  `vector_available` 和 `embedding_model`，方便确认混合检索是否真的启用
 
 解题逻辑全部复用 `agent.Agent`，Web 层只做 HTTP 包装、会话管理和展示字段整理。
 会话只存在进程内存里，服务重启后旧 id 自动失效并开始新会话；页面刷新也会开始
@@ -115,8 +119,12 @@ python -m rag.build
 # 抽取题目：428 道 -> 去重后 417 道（初赛 240 / 决赛 177）
 # 知识点覆盖 359/417（86%）
 
+python -m rag.build_embeddings
+# 417 道 × 512 维，写入 data/processed/embeddings.npz
+
 python -m rag.search "计算二重积分，其中D由x+y=1与两坐标轴围成" --top 3
 python -m rag.search "求幂级数的收敛域" --stage 初赛 --json
+python -m rag.search "圆环区域上带指数衰减因子的二重积分" --retriever hybrid
 ```
 
 也可以指定目录和输出：
@@ -142,8 +150,11 @@ python -m rag.build --papers-dir "D:/papers" --out data/processed/problems.jsonl
    │
    ▼
 data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
-   │
-用户提问 ── BM25 打分 ×（1 + 0.25 × 知识点重合度）
+   ├─ BM25 索引（中文二元组 + 知识点加权）
+   └─ BGE 编码 → data/processed/embeddings.npz（417 × 512）
+          │
+用户提问 ─┼─ BM25 Top-20 ─┐
+          └─ BGE Top-20 ──┴─ RRF 融合 → Top-K
    │
    ├─ Agent 工具 search_past_problems(query, k) → 题干 + 出处 + 知识点
    └─ Web 返回 related_problems → 前端“相关真题”卡片
@@ -156,9 +167,60 @@ data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
   体积；完整解答留给后续的 `get_problem_detail`。
 - 提示词明确要求检索结果是“其他题目”，禁止把其中的数字和结论搬进本题解答；
   正文最多用一句话点出最相关的一道，不重复题干（前端已有卡片）。
-- 检索是 BM25 + 标签加权，没有向量和 rerank。中文按二元组切分，不依赖词典，
-  对数学术语和少量抽取噪声更稳；代价是同义词（如“极值”与“最值”）匹配不到。
+- 检索默认是 BM25 + BGE 向量 + RRF：BM25 负责公式和术语的精确词面命中，
+  BGE 负责同义表述和语义查询，RRF 只看名次、不看两路分数的量纲。中文仍按
+  二元组切分，不依赖词典；向量模型是 `BAAI/bge-small-zh-v1.5`（512 维，CPU）。
+- 向量缓存与题库、模型绑定：题号或模型变化后，工具层检测到不一致会自动回退
+  BM25，不会拿旧向量硬搜新题库。
 - 追问（“这一步为什么”）不强制检索，也不做检索补位，避免拿追问去搜题库。
+
+### BGE 向量与 RRF 混合检索
+
+BM25 对公式、符号和术语很强，但用户只给语义描述时会漏召回。向量检索补这一块，
+两路结果再用 RRF 合并：
+
+```text
+查询 ── BM25 Top-20 ─────────────┐
+  │                              ├─ RRF：Σ weight / (60 + rank) ── Top-K
+  └─ BGE 编码 → 余弦 Top-20 ─────┘
+```
+
+实现位置：
+
+- `rag/vector.py`：BGE 懒加载、文档/查询编码、L2 归一化、余弦 Top-K、
+  `.npz` 缓存和“题库/模型是否变化”的校验；
+- `rag/hybrid.py`：RRF 融合、纯向量检索、BM25+向量混合检索；
+- `rag/build_embeddings.py`：为整库生成向量缓存；
+- `tools.search_past_problems`：按 `CMC_RETRIEVER` 选择 `auto`（默认）/
+  `bm25` / `vector` / `hybrid`；模型缺失、依赖未安装、缓存过期时自动回退 BM25。
+
+本机配置（`.env`，已被 gitignore）：
+
+```bash
+CMC_EMBEDDING_MODEL=D:/mathcoach-ai/models/bge-small-zh-v1.5
+CMC_MODEL_CACHE=D:/mathcoach-ai/models
+HF_HOME=D:/mathcoach-ai/hf-cache
+CMC_EMBEDDINGS_PATH=data/processed/embeddings.npz
+CMC_RETRIEVER=auto
+# 默认不加查询指令；设成官方指令可做消融
+CMC_QUERY_PREFIX=
+```
+
+几个取舍：
+
+- **编码文本 = 题干 + 知识点标签**。出处、届数不进编码文本，避免“第 16 届”
+  这类元数据抢语义权重；知识点是题目的压缩摘要，能帮助短题干和公式题聚类。
+  在 47 条评测查询上（同一组融合参数），加标签让 RRF 的 Recall@1
+  从 76.6% 提到 83.0%。
+- **查询侧默认不加 BGE 指令**。官方建议短查询加
+  `为这个句子生成表示以用于检索相关文章：`，但在本项目的评测集上不加指令
+  的召回更好；保留 `CMC_QUERY_PREFIX` 便于复现官方设置或做消融。
+- **BM25 权重 1.5 : 向量 1.0**。数学题里公式和术语是强信号，词面精确命中的
+  精度高；向量负责补同义表述。RRF 的 `k=60`，候选各取 20 条。
+- **首次检索会加载模型**（本机 CPU 约 7 秒），之后同一进程内复用；
+  向量缓存重新构建后需要重启 Web 进程，或者调用 `tools.clear_vector_cache()`。
+- `sentence-transformers` 会安装 CPU 版 torch（数百 MB），模型文件约 100 MB；
+  下载路径由 `CMC_MODEL_CACHE` / `HF_HOME` 控制，本项目放在 D 盘。
 
 ### 按届浏览完整真题
 
@@ -205,8 +267,9 @@ data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
 - `hard` 10 条：只给语义描述，尽量避开题干原词（例如“圆环区域上带指数衰减因子的二重积分”）。
 
 ```bash
-python -m rag.evaluate            # 对比 BM25 与标签加权
+python -m rag.evaluate            # 对比 BM25 / 标签加权 / BGE / RRF
 python -m rag.evaluate --misses   # 列出未命中的查询
+python -m rag.evaluate --no-vector  # 只跑 BM25 两组，不加载模型
 ```
 
 当前基线（k=5）：
@@ -215,24 +278,33 @@ python -m rag.evaluate --misses   # 列出未命中的查询
 | --- | --- | --- | --- |
 | BM25（不加权） | 74.5% | 97.9% | 0.835 |
 | BM25 + 标签加权 | 74.5% | 97.9% | 0.835 |
+| BGE 向量 | 68.1% | 91.5% | 0.763 |
+| **BM25×1.5 + BGE×1 + RRF** | **83.0%** | **97.9%** | **0.885** |
 
-分难度（标签加权）：
+分难度（RRF）：
 
 | 难度 | 条数 | Recall@1 | Recall@5 | MRR |
 | --- | --- | --- | --- | --- |
-| easy | 37 | 75.7% | 100.0% | 0.849 |
-| hard | 10 | 70.0% | 90.0% | 0.783 |
+| easy | 37 | 83.8% | 100.0% | 0.899 |
+| hard | 10 | 80.0% | 90.0% | 0.833 |
 
-三个结论：
+四个结论：
 
-- 中文二元组 + 公式归一化让词面匹配已经很强：easy 集 Recall@5 100%，hard 集只有 1 条完全未命中。
-- 标签加权没有改变排序：Top-5 候选通常共享同一个知识点，乘性系数对所有候选相同，
-  等于乘了一个常数。这个方案需要重做，或直接让位给向量召回 + RRF。
-- 12 条查询的正确答案不是第 1 名，主要是被更长、词频更高的题挤到后面
-  （例如 q04 的 `∫_0^1 ln(1+x²) dx` 排第 4），这是 BM25 长度归一化的典型问题。
+- **RRF 明显改善排序质量**：Recall@1 74.5% → 83.0%，MRR 0.835 → 0.885，
+  Recall@5 保持 97.9%。单看 BGE 反而更差（68.1%），说明它不是替代 BM25，
+  而是提供另一种排序信号。
+- **标签加权仍然无效**：Top-5 候选通常共享同一个知识点，乘性系数对所有候选
+  相同，等于乘了一个常数。它目前只是保留作消融对照。
+- **h01 仍未被 Top-5 召回**：`计算圆环区域上带指数衰减因子的二重积分`
+  的正确答案在 BGE 里排第 1，但 BM25 的前几名也被 BGE 排进前 5，RRF 的
+  “共识票”把它挤了下去。这是 RRF 的典型失败模式，下一步应尝试
+  cross-encoder rerank 或 query-adaptive 融合，而不是继续手调权重。
+- **BGE 的 4 条未命中集中在纯公式题**（q01–q03 的极限、q08 的二重积分）：
+  符号和上下标在语义模型里信息量有限，这类查询更适合 BM25。
 
-> 查询集目前是初版标注，复核后再冻结为正式基线。修改检索逻辑后应重跑这张表，
-> 只看单个例子的“感觉更准了”不算数。
+> 47 条查询仍是初版标注，而且上面的权重/指令设置是在同一组查询上比较后选的，
+> 存在过拟合风险。应先复核并冻结标签，再用留出集确认收益；只看单个例子的
+> “感觉更准了”不算数。
 
 ## 评测结果
 
@@ -309,6 +381,9 @@ mathcoach/
 │   ├── textnorm.py     # 检索归一化、二元分词、知识点标签
 │   ├── bm25.py         # 纯 Python Okapi BM25
 │   ├── index.py        # 索引加载、BM25 打分、按届浏览与分组
+│   ├── vector.py       # BGE 编码、向量缓存、余弦 Top-K
+│   ├── hybrid.py       # RRF 融合、BM25 + BGE 混合检索
+│   ├── build_embeddings.py # 为整库构建向量缓存
 │   ├── evaluate.py     # 检索评测：Recall@1 / Recall@5 / MRR
 │   ├── eval_queries.jsonl  # 47 条标注查询
 │   └── search.py       # 命令行检索
@@ -328,6 +403,7 @@ mathcoach/
 ├── test_agent.py
 ├── test_ask.py
 ├── test_rag.py
+├── test_vector.py      # 向量索引、RRF、工具回退
 ├── test_tools.py
 └── traces/             # 评测与问答轨迹（已 gitignore）
 ```
@@ -343,18 +419,20 @@ mathcoach/
 - Web 版没有登录、限流和公网部署方案，只适合本机演示。
 - 多轮会话只存在服务端内存：服务重启丢失；刷新页面会开始新对话；没有跨会话的
   长期记忆。
-- 检索目前只有 BM25 + 知识点加权：同义表述（“极值”/“最值”）和纯符号题召回
-  有限；还没有向量召回、rerank 和检索评测集。
+- 检索是 BM25 + BGE + RRF，但仍没有 cross-encoder rerank；h01 这类
+  “向量排第 1、BM25 也有一批高共识候选”的查询仍会被挤出 Top-5。
+- 向量模型在 CPU 上首次加载约 7 秒；换题库或换模型后必须重建向量缓存。
+- 47 条检索评测仍是初版标注，权重和查询指令是在同一组数据上选的，
+  存在过拟合风险。
 - 2024/2025 真题的公式抽取质量差，只适合检索，不适合直接展示。
 - 无流式输出。
 
 ## 下一步
 
 1. 扩充解题评测集，覆盖证明题、选择题和更多拒答措辞；引入多次运行与方差统计。
-2. 复核并冻结 47 条检索评测（重点看 hard 集），补更多同义改写和短查询，
-   把 BM25 基线固定下来。
-3. 加 `bge-small-zh-v1.5` 向量召回，用 RRF 与 BM25 融合，在同一评测集上对比
-   Recall@1 / Recall@5 / MRR；重点看 h01 这类语义查询是否被救回来，再决定要不要
-   cross-encoder rerank。同时重新设计或移除当前基本无效的标签加权。
+2. 复核并冻结 47 条检索评测（重点看 hard 集），补更多同义改写和短查询；
+   把当前 BM25 / BGE / RRF 数字固定为正式基线，避免继续在同一组查询上调参。
+3. 在冻结的留出集上验证 RRF 收益；针对 h01 这类失败样本尝试 cross-encoder
+   rerank 或 query-adaptive 融合，并重新设计或移除基本无效的标签加权。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
 5. 完善 Web 版：流式输出、图片输入，以及带登录和限流后的公网部署。

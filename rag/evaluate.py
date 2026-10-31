@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import unicodedata
 from pathlib import Path
+from typing import Callable
 
 from rag.index import ProblemIndex
 
@@ -85,8 +87,13 @@ def evaluate(
     *,
     k: int = 5,
     tag_weight: float = 0.25,
+    search_fn: Callable[[str, int], list] | None = None,
 ) -> dict:
-    """跑一遍查询集，返回逐条结果和汇总指标。"""
+    """跑一遍查询集，返回逐条结果和汇总指标。
+
+    ``search_fn`` 让评测可以接入任意检索器（BGE、RRF 等），
+    只要它返回带 ``.problem`` 的 hit 列表。
+    """
     aliases = _alias_map(index)
     known = {problem["id"] for problem in index.problems} | set(aliases)
 
@@ -96,7 +103,10 @@ def evaluate(
         expected = {aliases.get(pid, pid) for pid in item["expected_ids"]}
         unknown.update(pid for pid in expected if pid not in known)
 
-        hits = index.search(item["query"], k=k, tag_weight=tag_weight)
+        if search_fn is None:
+            hits = index.search(item["query"], k=k, tag_weight=tag_weight)
+        else:
+            hits = search_fn(item["query"], k)
         ids = [hit.problem["id"] for hit in hits]
         rank = next(
             (position for position, pid in enumerate(ids, 1) if pid in expected),
@@ -209,6 +219,9 @@ def _print_misses(label: str, summary: dict, k: int) -> None:
 
 
 def main() -> None:
+    from dotenv import load_dotenv
+
+    load_dotenv()
     parser = argparse.ArgumentParser(description="CMC 真题检索评测")
     parser.add_argument("--queries", default=str(DEFAULT_QUERIES))
     parser.add_argument("--index", default=str(DEFAULT_INDEX))
@@ -221,19 +234,86 @@ def main() -> None:
     )
     parser.add_argument("--misses", action="store_true", help="列出未命中的查询")
     parser.add_argument("--json", action="store_true", help="输出 JSON，便于留档")
+    parser.add_argument(
+        "--embeddings",
+        default=None,
+        help="向量缓存路径，默认读 CMC_EMBEDDINGS_PATH",
+    )
+    parser.add_argument(
+        "--no-vector",
+        action="store_true",
+        help="只跑 BM25 两组方案，不加载 BGE",
+    )
+    parser.add_argument("--rrf-k", type=int, default=60, help="RRF 平滑常数")
+    parser.add_argument("--bm25-weight", type=float, default=1.5)
+    parser.add_argument("--vector-weight", type=float, default=1.0)
     args = parser.parse_args()
 
     index = ProblemIndex.load(args.index)
     queries = load_queries(args.queries)
 
-    schemes = [
-        (DEFAULT_SCHEMES[0][0], DEFAULT_SCHEMES[0][1]),
-        (DEFAULT_SCHEMES[1][0], args.tag_weight),
+    schemes: list[tuple[str, Callable[[str, int], list]]] = [
+        (
+            _scheme_name(DEFAULT_SCHEMES[0][0], DEFAULT_SCHEMES[0][1]),
+            lambda query, limit: index.search(
+                query, k=limit, tag_weight=DEFAULT_SCHEMES[0][1]
+            ),
+        ),
+        (
+            _scheme_name(DEFAULT_SCHEMES[1][0], args.tag_weight),
+            lambda query, limit: index.search(
+                query, k=limit, tag_weight=args.tag_weight
+            ),
+        ),
     ]
+
+    vector_index = None
+    if not args.no_vector:
+        try:
+            from rag.vector import VectorIndex
+
+            vector_index = VectorIndex.load_for(
+                index,
+                args.embeddings,
+            )
+        except Exception as exc:
+            print(f"跳过向量方案：{exc}", file=sys.stderr)
+
+    if vector_index is not None:
+        from rag.hybrid import hybrid_search, vector_search
+
+        schemes.append((
+            "BGE 向量",
+            lambda query, limit: vector_search(
+                index, vector_index, query, k=limit
+            ),
+        ))
+        schemes.append((
+            f"BM25×{args.bm25_weight:g} + BGE×{args.vector_weight:g}"
+            f" + RRF（k={args.rrf_k}）",
+            lambda query, limit: hybrid_search(
+                index,
+                vector_index,
+                query,
+                k=limit,
+                rrf_k=args.rrf_k,
+                bm25_weight=args.bm25_weight,
+                vector_weight=args.vector_weight,
+            ),
+        ))
+
     summaries: list[tuple[str, dict]] = []
-    for label, weight in schemes:
-        name = _scheme_name(label, weight)
-        summaries.append((name, evaluate(index, queries, k=args.k, tag_weight=weight)))
+    for name, search_fn in schemes:
+        summaries.append((
+            name,
+            evaluate(
+                index,
+                queries,
+                k=args.k,
+                tag_weight=0.0,
+                search_fn=search_fn,
+            ),
+        ))
 
     if args.json:
         print(json.dumps(

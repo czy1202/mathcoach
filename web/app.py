@@ -30,6 +30,7 @@ from tools import (
     index_available,
     load_problem_index,
     parse_edition,
+    retriever_status,
     search_past_problems,
 )
 from tracing import TraceRecorder, new_trace_file
@@ -416,6 +417,7 @@ def health() -> dict:
         "model": config.OPENAI_MODEL,
         "key_set": bool(config.OPENAI_API_KEY.strip()),
         "papers_available": index_available(),
+        **retriever_status(),
     }
 
 
