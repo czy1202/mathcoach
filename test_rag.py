@@ -451,6 +451,8 @@ def _write_paper_index(tmp_path):
         ("第一届", 1),
         ("第十六届", 16),
         ("第3届初赛", 3),
+        ("第七届全国大学生数学竞赛", 7),
+        ("第十二届初赛", 12),
         ("十", 10),
         ("十二", 12),
         (None, None),
@@ -504,6 +506,82 @@ def test_list_past_problems_reports_empty_result(tmp_path, monkeypatch):
     data = json.loads(tools.list_past_problems(edition=9))
 
     assert "没有找到" in data["error"]
+
+
+def test_list_past_problems_accepts_section_and_spoken_category(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.list_past_problems(
+        year=2024, category="非数学A类", section="填空"
+    ))
+
+    assert data["count"] == 1
+    assert data["groups"][0]["section"] == "填空题"
+
+
+def test_get_past_problem_returns_full_question_by_number(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    monkeypatch.setenv("CMC_LATEX_PATH", str(tmp_path / "missing.json"))
+    data = json.loads(tools.get_past_problem(
+        edition="第一届", stage="初赛", number="第二题"
+    ))
+
+    assert data["id"] == "cmc-01-prelim-x-02"
+    assert data["number"] == 2
+    assert data["question"] == "第一届初赛第二题"
+    assert data["source"] == "第1届 非数学类 初赛 第2题"
+
+
+def test_get_past_problem_resolves_last_position(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    monkeypatch.setenv("CMC_LATEX_PATH", str(tmp_path / "missing.json"))
+    data = json.loads(tools.get_past_problem(
+        edition=1, stage="初赛", position="压轴题"
+    ))
+
+    assert data["number"] == 2
+    assert data["question"] == "第一届初赛第二题"
+
+
+def test_get_past_problem_asks_for_stage_when_ambiguous(tmp_path, monkeypatch):
+    """同届初赛、决赛都有最后一题时，不替用户猜场次。"""
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.get_past_problem(edition=1, position="last"))
+
+    assert "多道" in data["error"]
+    assert {(item["stage"], item["number"]) for item in data["candidates"]} == {
+        ("初赛", 2),
+        ("决赛", 1),
+    }
+
+
+def test_get_past_problem_requires_number_or_position(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.get_past_problem(edition=1))
+
+    assert "题号" in data["error"]
+    assert "position" in data["error"]
+
+
+def test_get_past_problem_reports_missing_number(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    data = json.loads(tools.get_past_problem(
+        edition=1, stage="初赛", number=9
+    ))
+
+    assert "第 9 题" in data["error"]
+    assert data["groups"][0]["numbers"] == [1, 2]
+
+
+def test_get_past_problem_filters_by_year_and_section(tmp_path, monkeypatch):
+    monkeypatch.setenv("CMC_INDEX_PATH", str(_write_paper_index(tmp_path)))
+    monkeypatch.setenv("CMC_LATEX_PATH", str(tmp_path / "missing.json"))
+    data = json.loads(tools.get_past_problem(
+        year="2024 年", section="填空题", number=1
+    ))
+
+    assert data["id"] == "cmc-2024-fill-01"
+    assert data["section"] == "填空题"
+    assert data["question"] == "2024 年填空题"
 
 
 # ---------- Agent 接线 ----------
@@ -560,6 +638,24 @@ def test_agent_exposes_paper_listing_tool_when_enabled():
     system_prompt = client.messages_seen[0][0]["content"]
     assert "list_past_problems" in system_prompt
     assert "不要逐题解答" in system_prompt
+
+
+def test_agent_exposes_locator_tool_and_prompt():
+    """按届定位具体题目要走 get_past_problem，不要把元数据当题干。"""
+    client = _RecordingClient()
+    Agent(client=client, retrieval=True).run("第七届初赛压轴题")
+
+    schema = next(
+        item for item in client.tools_seen[0]
+        if item["function"]["name"] == "get_past_problem"
+    )
+    assert schema["function"]["parameters"]["required"] == []
+    assert "position" in schema["function"]["parameters"]["properties"]
+
+    system_prompt = client.messages_seen[0][0]["content"]
+    assert "get_past_problem" in system_prompt
+    assert "压轴题" in system_prompt
+    assert "不要让用户重新粘贴题干" in system_prompt
 
 
 # ---------- Web 层：相关真题 ----------
@@ -619,4 +715,25 @@ def test_collect_related_does_not_fall_back_for_follow_up(monkeypatch):
         lambda query, k=3: called.append(query) or "[]",
     )
     assert collect_related([], "这一步为什么", enabled=True, follow_up=True) == []
+    assert called == []
+
+
+def test_collect_related_does_not_fall_back_after_locator(monkeypatch):
+    """“第七届压轴题”不是题干，get 之后不要再拿它去搜相似题。"""
+    import web.app as web_app
+
+    called = []
+    monkeypatch.setattr(
+        web_app,
+        "search_past_problems",
+        lambda query, k=3: called.append(query) or "[]",
+    )
+    events = [{
+        "type": "tool",
+        "name": "get_past_problem",
+        "result": json.dumps({"id": "p1", "question": "题一"}),
+    }]
+    assert collect_related(
+        events, "第七届初赛压轴题", enabled=True, follow_up=False
+    ) == []
     assert called == []

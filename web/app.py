@@ -12,6 +12,7 @@
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -26,6 +27,7 @@ import config
 from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
+from rag.latex import LatexStore
 from tools import (
     index_available,
     load_problem_index,
@@ -77,6 +79,39 @@ def get_client():
     return _client
 
 
+_latex_store = None
+_latex_store_path: Path | None = None
+_latex_lock = threading.Lock()
+
+
+def latex_cache_path() -> Path:
+    """展示用 LaTeX 缓存的位置，可用 CMC_LATEX_PATH 覆盖（测试用）。"""
+    return Path(
+        os.environ.get("CMC_LATEX_PATH", "data/processed/question_latex.json")
+    )
+
+
+def load_latex_store() -> LatexStore:
+    """懒加载题干 LaTeX 缓存；文件缺失时返回空缓存，不影响接口。"""
+    global _latex_store, _latex_store_path
+    path = latex_cache_path()
+    with _latex_lock:
+        if _latex_store is None or _latex_store_path != path:
+            _latex_store = LatexStore.load(path)
+            _latex_store_path = path
+        return _latex_store
+
+
+def display_question_for(problem: dict | None) -> str:
+    """取模型重建后的展示题干；没有缓存或内容已过期时返回空串。"""
+    if not problem:
+        return ""
+    try:
+        return load_latex_store().get(problem) or ""
+    except Exception:
+        return ""
+
+
 # ---------- 请求 / 响应结构 ----------
 
 class AskRequest(BaseModel):
@@ -114,6 +149,7 @@ class RelatedProblem(BaseModel):
     id: str = ""
     source: str = ""
     question: str = ""
+    display_question: str = ""
     knowledge_points: list[str] = Field(default_factory=list)
     score: float = 0.0
 
@@ -132,6 +168,7 @@ class PaperProblem(BaseModel):
     number: int = 0
     source: str = ""
     question: str = ""
+    display_question: str = ""
     knowledge_points: list[str] = Field(default_factory=list)
 
 
@@ -203,7 +240,7 @@ class AskResponse(BaseModel):
 def normalize_math_delimiters(text: str) -> str:
     """把 LaTeX 的 \\\\(...\\\\) / \\\\[...\\\\] 统一成 $...$ / $$...$$。
 
-    texmath 只认美元符号分隔符。负向后行断言避免把 LaTeX 换行
+    前端统一用美元符号分隔符。负向后行断言避免把 LaTeX 换行
     ``\\\\[2pt]`` 里的 ``\\\\[`` 误当成公式开头。
     """
     text = re.sub(r"(?<!\\)\\\[", "$$", text)
@@ -242,6 +279,20 @@ def collect_steps(events: list[dict]) -> list[dict]:
             "tool_count": len(event.get("tool_calls") or []),
         })
     return steps
+
+
+_CLARIFY_RE = re.compile(
+    r"请(?:确认|补充|回复|告诉|说明|明确)|哪一(?:场|届|年|份)|想要哪"
+)
+
+
+def asks_for_more_info(text: str | None) -> bool:
+    """回答是不是在向用户要信息，而不是给出完整解答。
+
+    这类回答没有“最终答案”行，不能走“最后一行像答案”的兜底，
+    否则“请确认初赛还是决赛第 10 题”会被误抽成最终答案。
+    """
+    return bool(_CLARIFY_RE.search(text or ""))
 
 
 def _parse_hits(raw: object) -> list[dict]:
@@ -306,13 +357,58 @@ def collect_related(
             seen.add(key)
             hits.append(hit)
 
-    if not hits and not follow_up:
+    # 按届定位题目的请求本身不是题干，拿它做相似度检索只会得到无关卡片。
+    used_locator = any(
+        event.get("type") == "tool" and event.get("name") == "get_past_problem"
+        for event in events
+    )
+    if not hits and not follow_up and not used_locator:
         try:
             hits = _parse_hits(search_past_problems(question, limit))
         except Exception:
             hits = []
 
-    return hits[:limit]
+    hits = hits[:limit]
+    _attach_related_display(hits)
+    return hits
+
+
+def _attach_related_display(hits: list[dict]) -> None:
+    """补全题干和展示用 LaTeX。
+
+    工具结果为了控制上下文只带 300 字题干；卡片展示时回到题库取全文，
+    再附上构建阶段缓存的 ``display_question``。题库或缓存缺失时保持
+    工具结果原样，页面仍有可读文本。
+    """
+    if not hits:
+        return
+    try:
+        index = load_problem_index() if index_available() else None
+    except Exception:
+        index = None
+    if index is None:
+        return
+
+    for hit in hits:
+        problem = index.get(hit.get("id", ""))
+        if not problem:
+            continue
+        full_question = str(problem.get("question") or "").strip()
+        if full_question:
+            hit["question"] = full_question
+        display = display_question_for(problem)
+        if display:
+            hit["display_question"] = display
+
+
+def _attach_paper_display(index, groups: list[dict]) -> None:
+    """给按届浏览的每道题附上展示用 LaTeX。"""
+    for group in groups:
+        for entry in group.get("problems") or []:
+            problem = index.get(str(entry.get("id") or ""))
+            display = display_question_for(problem)
+            if display:
+                entry["display_question"] = display
 
 
 def build_paper_payload(
@@ -340,11 +436,13 @@ def build_paper_payload(
         entries = [entry for entry in entries if entry.get("section") == section]
     if not entries:
         return None
+    groups = index.group_problems(entries)
+    _attach_paper_display(index, groups)
     return {
         "edition": edition,
         "year": year,
         "count": len(entries),
-        "groups": index.group_problems(entries),
+        "groups": groups,
     }
 
 
@@ -454,25 +552,17 @@ def get_paper(
             detail="题库未构建，请先在项目根目录运行 python -m rag.build。",
         )
 
-    index = load_problem_index()
-    entries = index.list_problems(
+    payload = build_paper_payload(
         edition=edition,
         year=year,
-        stage=stage or None,
-        category=category or None,
+        stage=stage,
+        category=category,
         supplement=supplement,
+        section=section,
     )
-    if section:
-        entries = [entry for entry in entries if entry.get("section") == section]
-    if not entries:
+    if payload is None:
         raise HTTPException(status_code=404, detail="没有找到符合条件的真题。")
-
-    return {
-        "edition": edition,
-        "year": year,
-        "count": len(entries),
-        "groups": index.group_problems(entries),
-    }
+    return payload
 
 
 @app.post("/api/ask", response_model=AskResponse)
@@ -541,7 +631,11 @@ def ask(req: AskRequest) -> AskResponse:
             paper = collect_paper(tracer.events) if retrieval else None
             final_answer = extract_final_answer(
                 answer,
-                allow_fallback=not follow_up and paper is None,
+                allow_fallback=(
+                    not follow_up
+                    and paper is None
+                    and not asks_for_more_info(answer)
+                ),
             )
             error = tracer.error
             if error is None and answer.startswith("错误："):

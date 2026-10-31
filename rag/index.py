@@ -136,6 +136,13 @@ class ProblemIndex:
         self._doc_tags = [
             set(problem.get("knowledge_points") or []) for problem in problems
         ]
+        # 相关真题和试卷浏览拿到的可能只是 id（或去重后保留的旧 id），
+        # 这里建一张反查表，便于补全题干和展示用 LaTeX。
+        self._by_id: dict[str, dict] = {}
+        for problem in problems:
+            for problem_id in [problem.get("id"), *(problem.get("aliases") or [])]:
+                if problem_id:
+                    self._by_id.setdefault(str(problem_id), problem)
 
     @classmethod
     def load(cls, path: str | Path) -> "ProblemIndex":
@@ -149,6 +156,10 @@ class ProblemIndex:
 
     def __len__(self) -> int:
         return len(self.problems)
+
+    def get(self, problem_id: str) -> dict | None:
+        """按 id 取主记录；去重时合并的旧 id 也能命中。"""
+        return self._by_id.get(str(problem_id or ""))
 
     def search(
         self,

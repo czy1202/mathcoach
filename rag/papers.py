@@ -2,7 +2,13 @@
 
 目前覆盖 `初赛试题（按届数）` 和 `决赛试题（按届数）` 两个目录。
 这两批 PDF 是文字版，按 `题目N` 切分很稳定；公式抽取会散架
-（∫ -> Z、∑ -> X），检索侧由 textnorm 统一，展示侧保留原文。
+（∫ -> Z、∑ -> X），所以建库时同时保留两版题干：
+
+- ``question``：压成一行的文本，供检索和模型上下文使用；
+- ``question_layout``：保留换行和字号，供 ``rag.latex`` 重建展示用公式。
+
+展示层读的是模型重建后缓存的 ``display_question``，不再直接渲染
+PDF 文字层。
 
 2024/2025 的试卷是另一种版式（填空/选择/解答），放在 `parse_recent_text`。
 """
@@ -46,6 +52,34 @@ _RECENT_MAX_ITEMS = {"填空题": 6, "选择题": 6, "解答题": 5}
 
 _TRAILING_PAGE_NO_RE = re.compile(r"\s+\d{1,2}\s*$")
 
+# 老试卷的数学字体没有 ToUnicode，PyMuPDF 会把 CMEX10 的字形码
+# 直接当 ASCII 输出：∫ 变成 Z，∑ 变成 X，大括号变成 \x12/\x13。
+# 修正后的文本同时进入 question 和 question_layout；改完题库后需要
+# 重新构建向量缓存（python -m rag.build_embeddings）。
+_CMEX_GLYPHS = {
+    "ZZZ": "∭",
+    "ZZ": "∬",
+    "Z": "∫",
+    "X": "∑",
+    "P": "∑",
+    "\x12": "(",
+    "\x13": ")",
+    "\x0e": "[",
+    "\x0f": "]",
+    "\x10": "{",
+    "\x11": "}",
+}
+
+_LAYOUT_MARK_RE = re.compile(r"@@([\d.]+),([\d.]+)@@")
+
+
+def _map_cmex(text: str, font: str) -> str:
+    if font != "CMEX10":
+        return text
+    for source, target in _CMEX_GLYPHS.items():
+        text = text.replace(source, target)
+    return text
+
 
 def _cn_to_int(text: str) -> int:
     """把 '十六' / '十' / '三' 之类的届数转成整数。"""
@@ -61,7 +95,9 @@ def _cn_to_int(text: str) -> int:
 
 def _clean_body(raw: str) -> str:
     """把逐行抽取的题目压成一行，去掉页眉页脚和排版噪声。"""
-    s = raw.replace("b 站李熵一排版整理", " ").replace("♡", " ")
+    # _extract_text 会在每行前面附一个字号/坐标标记，供 _clean_layout 使用
+    s = re.sub(r"(?m)^@@[\d.,]+@@\s*$", " ", raw)
+    s = s.replace("b 站李熵一排版整理", " ").replace("♡", " ")
     # PDF 里偶有控制字符（\x00 等），展示和 JSON 里都没有意义
     s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", s)
     s = re.sub(r"\s+", " ", s).strip()
@@ -75,6 +111,43 @@ def _clean_body(raw: str) -> str:
     if len(s) > 40:
         s = _TRAILING_PAGE_NO_RE.sub("", s)
     return s.strip()
+
+
+def _clean_layout(raw: str) -> str:
+    """保留换行的题干原文，供“重建 LaTeX”时恢复分式/上下标结构。
+
+    PDF 的文字层会把分数拆成上下两行、把极限上下限拆到相邻行；
+    `_clean_body` 把这些换行压成了空格，模型就再也看不出结构。
+    这里只去页眉页脚和噪声，不合并行。
+    """
+    s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", raw)
+    s = s.replace("♡", " ")
+
+    lines: list[str] = []
+    size = None
+    for line in s.splitlines():
+        stripped = line.strip()
+        marker = _LAYOUT_MARK_RE.fullmatch(stripped)
+        if marker:
+            size = float(marker.group(1))
+            continue
+
+        line = re.sub(r"[ \t　]+", " ", line).strip()
+        if not line:
+            continue
+        # 页眉“第X届非数学类…”不参与重建
+        if re.fullmatch(r"第[一二三四五六七八九十]+届非数学类.*", line):
+            continue
+        # 字号是判断上下标/分式层级的关键线索：正文 12pt，
+        # 上下标和分式的分子分母通常是 8pt。
+        prefix = f"[{size:.0f}pt] " if size is not None else ""
+        lines.append(prefix + line)
+        size = None
+
+    # 末尾孤立的 1-2 位数字是页码；只删最后一行，避免误删分式的分子
+    if len(lines) > 2 and re.fullmatch(r"\d{1,2}", lines[-1]):
+        lines.pop()
+    return "\n".join(lines)
 
 
 def _supplement_code(supplement: str) -> str:
@@ -187,7 +260,8 @@ def parse_retypeset_text(
                 if q_index + 1 < len(questions)
                 else len(block)
             )
-            body = _clean_body(block[body_start:body_end])
+            body_raw = block[body_start:body_end]
+            body = _clean_body(body_raw)
             if len(body) < 8:
                 continue
 
@@ -195,6 +269,7 @@ def parse_retypeset_text(
             problems.append({
                 "id": _make_id(edition, stage, category, supplement, number),
                 "question": body,
+                "question_layout": _clean_layout(body_raw),
                 "stage": stage,
                 "edition": edition,
                 "category": category,
@@ -210,9 +285,34 @@ def parse_retypeset_text(
 
 
 def _extract_text(path: Path) -> str:
+    """按行抽取文字，并在每行后附 `@@字号,y@@` 标记。
+
+    标记只给 `_clean_layout` 重建 LaTeX 用，`_clean_body` 会先删掉。
+    用 dict 而不是纯 text，是因为纯 text 丢掉了字号和基线，
+    无法判断上下标；同时可以按字体修正 CMEX10 的字形码。
+    """
     document = fitz.open(str(path))
     try:
-        return "\n".join(page.get_text("text") for page in document)
+        lines: list[str] = []
+        for page in document:
+            data = page.get_text("dict")
+            for block in data.get("blocks", []):
+                for line in block.get("lines", []):
+                    spans = line.get("spans", [])
+                    text = "".join(
+                        _map_cmex(span.get("text", ""), span.get("font", ""))
+                        for span in spans
+                    )
+                    if not text.strip():
+                        continue
+                    size = max(
+                        (float(span.get("size", 0)) for span in spans),
+                        default=0.0,
+                    )
+                    y = float(line.get("bbox", [0, 0, 0, 0])[1])
+                    lines.append(f"@@{size:.1f},{y:.1f}@@")
+                    lines.append(text)
+        return "\n".join(lines)
     finally:
         document.close()
 
@@ -254,7 +354,8 @@ def parse_recent_text(
         for i_index, item in enumerate(items):
             body_start = item.end()
             body_end = items[i_index + 1].start() if i_index + 1 < len(items) else len(block)
-            body = _clean_body(block[body_start:body_end])
+            body_raw = block[body_start:body_end]
+            body = _clean_body(body_raw)
             if len(body) < 8:
                 continue
 
@@ -264,6 +365,7 @@ def parse_recent_text(
             problems.append({
                 "id": f"cmc-{year}-{section_code}-{number:02d}",
                 "question": body,
+                "question_layout": _clean_layout(body_raw),
                 "stage": "初赛",
                 "edition": None,
                 "year": year,

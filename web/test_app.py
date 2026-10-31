@@ -259,6 +259,44 @@ def test_ask_returns_paper_instead_of_answer_card(paper_env, monkeypatch, tmp_pa
     assert [tool["name"] for tool in data["tools"]] == ["list_past_problems"]
 
 
+class ClarifyClient:
+    """定位到多份试卷后，模型反问用户要初赛还是决赛。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                content="",
+                tool_calls=[
+                    ToolCall(
+                        name="get_past_problem",
+                        args={"edition": "第一届", "position": "last"},
+                        id="call_1",
+                    )
+                ],
+            )
+        return LLMResponse(
+            content="初赛和决赛各有一道第 2 题。请确认你要哪一场？"
+        )
+
+
+def test_ask_clarification_has_no_answer_card(paper_env, monkeypatch, tmp_path):
+    """反问用户场次时，正文里的题号不能被抽成“最终答案”。"""
+    monkeypatch.setattr(web_app, "_client", ClarifyClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post("/api/ask", json={"question": "第一届压轴题"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert [tool["name"] for tool in data["tools"]] == ["get_past_problem"]
+    assert data["final_answer"] is None
+    assert data["related_problems"] == []
+
+
 # ---------- 求解接口 ----------
 
 def test_ask_with_stub_client(monkeypatch, tmp_path):

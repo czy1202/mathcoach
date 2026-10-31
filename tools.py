@@ -253,6 +253,11 @@ def parse_edition(value: Any) -> int | None:
     if digits:
         return int(digits.group(0))
 
+    # 兼容“第七届全国大学生数学竞赛”“第十二届初赛”这类后续文字
+    numeral = re.match(r"[一二三四五六七八九十]+", text)
+    if numeral:
+        text = numeral.group(0)
+
     if text == "十":
         return 10
     if "十" in text:
@@ -276,12 +281,170 @@ def _parse_year(value: Any) -> int | None:
     return int(match.group(1))
 
 
+def _normalize_stage(value: Any) -> str | None:
+    """把“预赛/初赛”“决赛”等说法收敛到题库里的两种阶段。"""
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "初赛" in text or "预赛" in text:
+        return "初赛"
+    if "决赛" in text:
+        return "决赛"
+    return text
+
+
+def _normalize_category(value: Any) -> str | None:
+    """允许模型把用户原话“非数学A类”直接传进来。"""
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "未分类" in text:
+        return "未分类"
+    upper = text.upper()
+    if "A" in upper:
+        return "A"
+    if "B" in upper:
+        return "B"
+    # 题库全部是非数学类；用户只说“非数学类”时不要额外加类别过滤
+    if "非数学" in text:
+        return None
+    return text
+
+
+def _normalize_supplement(value: Any) -> str | None:
+    """``None`` 表示不限；空串表示正卷；“补赛”可匹配补赛1/补赛2。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text in {"", "正卷", "无"}:
+        return ""
+    return text
+
+
+def _normalize_section(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if "解答" in text:
+        return "解答题"
+    if "填空" in text:
+        return "填空题"
+    if "选择" in text:
+        return "选择题"
+    return text
+
+
+def _filter_entries(
+    entries: list[dict],
+    *,
+    supplement: str | None = None,
+    section: str | None = None,
+) -> list[dict]:
+    """补做索引层没有提供的模糊过滤（补赛编号、题型简称）。"""
+    if supplement is not None:
+        if supplement == "":
+            entries = [entry for entry in entries if not entry["supplement"]]
+        else:
+            entries = [
+                entry for entry in entries
+                if entry["supplement"].startswith(supplement)
+            ]
+    if section:
+        entries = [
+            entry for entry in entries
+            if section in (entry.get("section") or "")
+        ]
+    return entries
+
+
+def _parse_problem_number(value: Any) -> int | None:
+    """把 10 / "10" / "第十题" / "第10题" 统一成正整数题号。"""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"无法识别题号：{value!r}")
+    if isinstance(value, int):
+        number = value
+    elif isinstance(value, float) and value.is_integer():
+        number = int(value)
+    else:
+        text = str(value).strip()
+        text = re.sub(r"^第\s*", "", text)
+        text = re.sub(r"\s*题\s*$", "", text)
+        number = parse_edition(text)
+    if number is None:
+        return None
+    if number <= 0:
+        raise ValueError(f"题号必须是正整数：{value!r}")
+    return number
+
+
+def _parse_position(value: Any) -> str | None:
+    """把“压轴题/最后一题/first”解析成 first / last。"""
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if "压轴" in text or "最后" in text or text in {
+        "last", "final", "last_problem", "末题",
+    }:
+        return "last"
+    if "第一" in text or text in {"first", "first_problem", "首题"}:
+        return "first"
+    raise ValueError(f"无法识别位置：{value!r}，请用 first 或 last")
+
+
+def _display_question(problem: dict) -> str:
+    """读构建期缓存；没有缓存时回退 PDF 原文。"""
+    try:
+        from rag.latex import LatexStore
+
+        path = Path(
+            os.environ.get(
+                "CMC_LATEX_PATH", "data/processed/question_latex.json"
+            )
+        )
+        if not path.exists():
+            return ""
+        return LatexStore.load(path).get(problem) or ""
+    except Exception:
+        return ""
+
+
+def _group_summary(group: dict) -> dict:
+    return {
+        "stage": group["stage"],
+        "category": group["category"],
+        "supplement": group["supplement"],
+        "section": group["section"],
+        "label": group["label"],
+        "count": group["count"],
+        "numbers": group["numbers"],
+        "missing": group["missing"],
+        "complete": group["complete"],
+        "sources": [problem["source"] for problem in group["problems"]],
+    }
+
+
+def _candidate_ref(group: dict, entry: dict) -> dict:
+    return {
+        "id": entry["id"],
+        "source": entry["source"],
+        "stage": entry["stage"],
+        "category": entry["category"],
+        "supplement": entry["supplement"],
+        "section": entry["section"],
+        "number": entry["number"],
+        "label": group["label"],
+    }
+
+
 def list_past_problems(
     edition: Any = None,
     year: Any = None,
     stage: Any = None,
     category: Any = None,
     supplement: Any = None,
+    section: Any = None,
 ) -> str:
     """列出某一届/某一年真题的全部题目（返回题号、出处和数量）。
 
@@ -301,11 +464,10 @@ def list_past_problems(
             "available_editions": list(range(1, 17)),
         }, ensure_ascii=False)
 
-    stage_text = str(stage).strip() if stage not in (None, "") else None
-    category_text = str(category).strip() if category not in (None, "") else None
-    supplement_text = (
-        str(supplement).strip() if supplement is not None else None
-    )
+    stage_text = _normalize_stage(stage)
+    category_text = _normalize_category(category)
+    supplement_text = _normalize_supplement(supplement)
+    section_text = _normalize_section(section)
 
     index = load_problem_index()
     entries = index.list_problems(
@@ -313,7 +475,10 @@ def list_past_problems(
         year=year_num,
         stage=stage_text,
         category=category_text,
-        supplement=supplement_text,
+        supplement=None,
+    )
+    entries = _filter_entries(
+        entries, supplement=supplement_text, section=section_text
     )
     if not entries:
         return json.dumps({
@@ -323,26 +488,127 @@ def list_past_problems(
         }, ensure_ascii=False)
 
     groups = index.group_problems(entries)
-    compact = [
-        {
-            "stage": group["stage"],
-            "category": group["category"],
-            "supplement": group["supplement"],
-            "section": group["section"],
-            "label": group["label"],
-            "count": group["count"],
-            "numbers": group["numbers"],
-            "missing": group["missing"],
-            "complete": group["complete"],
-            "sources": [problem["source"] for problem in group["problems"]],
-        }
-        for group in groups
-    ]
     return json.dumps({
         "edition": edition_num,
         "year": year_num,
         "count": len(entries),
-        "groups": compact,
+        "groups": [_group_summary(group) for group in groups],
+    }, ensure_ascii=False)
+
+
+def get_past_problem(
+    edition: Any = None,
+    year: Any = None,
+    stage: Any = None,
+    category: Any = None,
+    supplement: Any = None,
+    section: Any = None,
+    number: Any = None,
+    position: Any = None,
+) -> str:
+    """按届数/年份 + 场次 + 题号（或位置）取回一道题及其完整题干。
+
+    和 ``search_past_problems`` 的区别：
+    - search 用题干做语义检索，返回“相似题”；
+    - get 用确定字段定位，返回用户指定的那一道题，题干完整、可直接解答。
+
+    用户说“压轴题/最后一题”时由调用方传 ``position="last"``。若同一届
+    有多份符合条件的试卷（例如初赛、决赛都有第 10 题），不替用户猜，
+    返回 candidates 让模型确认。
+    """
+    try:
+        edition_num = parse_edition(edition)
+        year_num = _parse_year(year)
+        number_value = _parse_problem_number(number)
+        position_value = _parse_position(position)
+    except (TypeError, ValueError) as exc:
+        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+
+    if edition_num is None and year_num is None:
+        return json.dumps({
+            "error": "请提供届数（例如 1）或年份（例如 2024）。",
+            "available_editions": list(range(1, 17)),
+        }, ensure_ascii=False)
+    if number_value is None and position_value is None:
+        return json.dumps({
+            "error": "请提供题号（number）或位置（position=first/last）。"
+                     "“压轴题/最后一题”用 position=last。",
+        }, ensure_ascii=False)
+    if number_value is not None and position_value is not None:
+        return json.dumps({
+            "error": "number 和 position 只能二选一，不要同时提供。",
+        }, ensure_ascii=False)
+
+    stage_text = _normalize_stage(stage)
+    category_text = _normalize_category(category)
+    supplement_text = _normalize_supplement(supplement)
+    section_text = _normalize_section(section)
+
+    index = load_problem_index()
+    entries = index.list_problems(
+        edition=edition_num,
+        year=year_num,
+        stage=stage_text,
+        category=category_text,
+        supplement=None,
+    )
+    entries = _filter_entries(
+        entries, supplement=supplement_text, section=section_text
+    )
+    groups = index.group_problems(entries)
+
+    if not groups:
+        return json.dumps({
+            "error": "没有找到符合条件的真题。",
+            "edition": edition_num,
+            "year": year_num,
+            "stage": stage_text,
+            "category": category_text,
+        }, ensure_ascii=False)
+
+    candidates: list[tuple[dict, dict]] = []
+    for group in groups:
+        problems = group["problems"]
+        if number_value is not None:
+            candidates.extend(
+                (group, entry) for entry in problems
+                if entry["number"] == number_value
+            )
+        else:
+            selected = problems[-1] if position_value == "last" else problems[0]
+            candidates.append((group, selected))
+
+    if not candidates:
+        return json.dumps({
+            "error": f"没有找到第 {number_value} 题。",
+            "groups": [_group_summary(group) for group in groups],
+        }, ensure_ascii=False)
+
+    if len(candidates) > 1:
+        return json.dumps({
+            "error": "找到多道符合条件的题，请补充 stage / category / section。",
+            "candidates": [
+                _candidate_ref(group, entry) for group, entry in candidates
+            ],
+        }, ensure_ascii=False)
+
+    group, entry = candidates[0]
+    problem = index.get(entry["id"]) or entry
+    question = _display_question(problem) or entry["question"]
+    return json.dumps({
+        "id": entry["id"],
+        "paper_id": entry["paper_id"],
+        "edition": entry["edition"],
+        "year": entry["year"],
+        "stage": entry["stage"],
+        "category": entry["category"],
+        "supplement": entry["supplement"],
+        "section": entry["section"],
+        "number": entry["number"],
+        "source": entry["source"],
+        "label": group["label"],
+        "question": question,
+        "knowledge_points": entry["knowledge_points"],
     }, ensure_ascii=False)
 
 
@@ -370,8 +636,29 @@ RETRIEVAL_TOOLS: dict[str, dict] = {
             "edition": "届数，例如 1、16 或“第一届”；与 year 二选一",
             "year": "年份，例如 2024；与 edition 二选一",
             "stage": "可选，初赛 / 决赛",
-            "category": "可选，A / B / 未分类",
-            "supplement": "可选，补赛 / 补赛1 / 补赛2",
+            "category": "可选，A / B / 未分类（可直接传用户原话，如“非数学A类”）",
+            "supplement": "可选，正卷 / 补赛 / 补赛1 / 补赛2",
+            "section": "可选，选择题 / 填空题 / 解答题",
+        },
+        "必填": [],
+    },
+    "get_past_problem": {
+        "函数": get_past_problem,
+        "描述": (
+            "按届数/年份、场次、类别和题号或位置，取回指定的一道 CMC 真题"
+            "及其完整题干。用户要求解答某届/某卷的“压轴题”“最后一题”"
+            "或“第 N 题”时使用；取回后直接把 question 当作本题题干解答，"
+            "不要再让用户粘贴题干。"
+        ),
+        "参数说明": {
+            "edition": "届数，例如 1、16 或“第七届”；与 year 二选一",
+            "year": "年份，例如 2024；与 edition 二选一",
+            "stage": "可选，初赛 / 决赛；同届两场都有该题时必填",
+            "category": "可选，A / B / 未分类（可直接传“非数学A类”）",
+            "supplement": "可选，正卷 / 补赛 / 补赛1 / 补赛2",
+            "section": "可选，选择题 / 填空题 / 解答题",
+            "number": "题号，例如 10 或“第十题”；与 position 二选一",
+            "position": "题号的首尾位置：last 表示压轴题/最后一题，first 表示第一题",
         },
         "必填": [],
     },

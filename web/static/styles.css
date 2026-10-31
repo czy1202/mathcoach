@@ -533,6 +533,16 @@ textarea {
   font-size: 1.04em;
 }
 
+/* KaTeX 不可用或 TeX 语法错误时，保留源码而不是整块消失 */
+.math-fallback {
+  padding: 0.05em 0.3em;
+  border-radius: 4px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 0.92em;
+}
+
 /* ---------- 答案卡片 ---------- */
 
 .answer-card {
@@ -620,6 +630,28 @@ textarea {
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
+}
+
+/* 重建后的题干含分式/上下标，行高不固定，不能再按 3 行截断 */
+.related-question.rendered {
+  display: block;
+  -webkit-line-clamp: unset;
+}
+
+.related-question.rendered p {
+  margin: 0 0 5px;
+}
+
+.related-question.rendered p:last-child {
+  margin-bottom: 0;
+}
+
+.related-question .katex-display {
+  margin: 0.5em 0;
+}
+
+.related-question .katex {
+  font-size: 1em;
 }
 
 .related-tags {
@@ -1020,6 +1052,18 @@ textarea {
   line-height: 1.78;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.paper-q-text.rendered {
+  white-space: normal;
+}
+
+.paper-q-text.rendered p {
+  margin: 0 0 7px;
+}
+
+.paper-q-text.rendered p:last-child {
+  margin-bottom: 0;
 }
 
 .paper-q-tags {

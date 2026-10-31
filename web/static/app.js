@@ -30,20 +30,93 @@
   let paperRequestId = 0;
 
   // ---------- Markdown / 公式渲染 ----------
+  //
+  // 渲染顺序很关键：markdown 会把 `_` 当成斜体、把 `*` 当成加粗，
+  // 直接喂给 marked 会破坏 LaTeX（例如 y_1、x^*）。所以先把数学块
+  // 抽出来换成纯字母数字占位符，渲染完 markdown 后再用 KaTeX 还原。
+  // 代码块和行内代码里的 $ 不算公式，避免把 shell 变量之类误渲染。
 
-  const md = typeof window.markdownit === "function"
-    ? window.markdownit({ html: false, linkify: true, breaks: true })
-    : null;
+  const marked = window.marked || null;
 
-  if (md && window.texmath && window.katex) {
-    md.use(window.texmath, {
-      engine: window.katex,
-      delimiters: "dollars",
-      katexOptions: {
+  const CODE_OR_MATH = new RegExp(
+    [
+      "(```[\\s\\S]*?```|~~~[\\s\\S]*?~~~|`[^`\\n]*`)", // 1: 代码，原样保留
+      "(\\$\\$[\\s\\S]+?\\$\\$"                          // 2a: $$...$$ 独立公式
+        + "|\\\\\\[[\\s\\S]+?\\\\\\]"                    // 2b: \[...\] 独立公式
+        + "|\\\\\\([\\s\\S]+?\\\\\\)"                    // 2c: \(...\) 行内公式
+        + "|(?<!\\\\)\\$(?!\\s)(?:\\\\.|[^$\\\\\\n])+?(?<!\\s)\\$)", // 2d: $...$
+    ].join("|"),
+    "g",
+  );
+
+  function protectMath(text) {
+    const store = [];
+    const protectedText = String(text).replace(
+      CODE_OR_MATH,
+      (match, code, math) => {
+        if (code || !math) return match;
+        let body;
+        let display;
+        if (math.startsWith("$$")) {
+          body = math.slice(2, -2);
+          display = true;
+        } else if (math.startsWith("\\[")) {
+          body = math.slice(2, -2);
+          display = true;
+        } else if (math.startsWith("\\(")) {
+          body = math.slice(2, -2);
+          display = false;
+        } else {
+          body = math.slice(1, -1);
+          display = false;
+        }
+        const token = `MCKATEXTOKEN${store.length}END`;
+        store.push({ token, body: body.trim(), display });
+        return token;
+      },
+    );
+    return { text: protectedText, store };
+  }
+
+  function renderMath(body, displayMode) {
+    if (!window.katex) {
+      const wrapped = displayMode ? `$$${body}$$` : `$${body}$`;
+      return `<span class="math-fallback">${escapeHtml(wrapped)}</span>`;
+    }
+    try {
+      // 行内 $\lim_{x \to 0}$ 在 TeX 里默认把下标放在右侧；本项目的
+      // 排版要求是下标落在 lim 正下方，所以统一补一个 \limits。
+      const tex = body.replace(/\\lim(?![a-zA-Z])(?!\\limits)/g, "\\lim\\limits");
+      return window.katex.renderToString(tex, {
+        displayMode,
         throwOnError: false,
         strict: "ignore",
         trust: false,
+        output: "htmlAndMathml",
+      });
+    } catch (err) {
+      console.error("公式渲染失败", err);
+      return `<span class="math-fallback">${escapeHtml(
+        displayMode ? `$$${body}$$` : `$${body}$`,
+      )}</span>`;
+    }
+  }
+
+  function restoreMath(html, store) {
+    if (!store.length) return html;
+    // 独立公式独占一行时，marked 会包一层 <p>；去掉它，避免
+    // .katex-display 的块级排版和段落边距叠在一起。
+    const unwrapped = html.replace(
+      /<p>\s*(MCKATEXTOKEN(\d+)END)\s*<\/p>/g,
+      (match, token, index) => {
+        const item = store[Number(index)];
+        return item && item.display ? token : match;
       },
+    );
+    return unwrapped.replace(/MCKATEXTOKEN(\d+)END/g, (match, index) => {
+      const item = store[Number(index)];
+      if (!item) return match;
+      return renderMath(item.body, item.display);
     });
   }
 
@@ -65,20 +138,71 @@
 
   function renderMarkdown(text) {
     if (!text) return "";
-    if (!md) return `<pre class="fallback">${escapeHtml(text)}</pre>`;
+    if (!marked) return `<pre class="fallback">${escapeHtml(text)}</pre>`;
+    let protectedText = String(text);
+    let store = [];
     try {
-      return sanitize(md.render(text));
+      const result = protectMath(text);
+      protectedText = result.text;
+      store = result.store;
+      // 先渲染 markdown 并把占位符原样留在 HTML 里，再消毒，
+      // 最后才插入 KaTeX 生成的排版（KaTeX 会对 TeX 源做转义）。
+      const html = marked.parse(protectedText, {
+        gfm: true,
+        breaks: true,
+        async: false,
+      });
+      return restoreMath(sanitize(html), store);
     } catch (err) {
       console.error("Markdown 渲染失败", err);
-      return `<pre class="fallback">${escapeHtml(text)}</pre>`;
+      try {
+        return restoreMath(sanitize(escapeHtml(protectedText)), store);
+      } catch (_) {
+        return `<pre class="fallback">${escapeHtml(text)}</pre>`;
+      }
     }
   }
 
+  // 最终答案卡片只占一行，用 parseInline 避免多出 <p> 影响卡片布局。
+  function renderInline(text) {
+    if (!text) return "";
+    if (!marked || typeof marked.parseInline !== "function") {
+      return escapeHtml(text);
+    }
+    try {
+      const result = protectMath(text);
+      const html = marked.parseInline(result.text, { gfm: true, breaks: false });
+      return restoreMath(sanitize(html), result.store);
+    } catch (err) {
+      console.error("行内内容渲染失败", err);
+      return escapeHtml(text);
+    }
+  }
+
+  function latexifySimple(expr) {
+    return String(expr)
+      .trim()
+      .replace(/\bpi\b/g, "\\pi ")
+      .replace(/π/g, "\\pi ")
+      .replace(/\bsqrt\(([^()]*)\)/g, "\\sqrt{$1}")
+      .replace(/\*/g, "\\cdot ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function formatFinalAnswer(value) {
-    return String(value)
+    const text = String(value)
       .replace(/\(\(([^()]+)\)\/\(([^()]+)\)\)/g, "($1)/($2)")
       .replace(/\*\*/g, "^")
-      .replace(/\bpi\b/g, "π");
+      .replace(/(?<!\\)\bpi\b/g, "π");
+
+    // 服务端提取答案时会把 \frac{a}{b} 归一化成 ((a)/(b)) 交给判分器。
+    // 卡片是展示给用户看的，这里把整个答案就是简单分数的情况还原成排版公式。
+    const fraction = text.match(/^\(?([^()/]+)\)?\s*\/\s*\(?([^()/]+)\)?$/);
+    if (fraction && !text.includes("$")) {
+      return `$\\frac{${latexifySimple(fraction[1])}}{${latexifySimple(fraction[2])}}$`;
+    }
+    return text;
   }
 
   // ---------- 消息 DOM ----------
@@ -201,9 +325,16 @@
       source.textContent = item.source || "CMC 历年真题";
       card.appendChild(source);
 
-      const question = document.createElement("p");
+      const question = document.createElement("div");
       question.className = "related-question";
-      question.textContent = item.question || "";
+      if (item.display_question) {
+        // 构建阶段已把 PDF 原文重建为 Markdown + LaTeX，走和助手回答
+        // 相同的 KaTeX 管线；没有缓存时退回纯文本，至少不会显示乱码源码。
+        question.classList.add("rendered");
+        question.innerHTML = renderMarkdown(item.display_question);
+      } else {
+        question.textContent = item.question || "";
+      }
       card.appendChild(question);
 
       const tags = Array.isArray(item.knowledge_points)
@@ -254,7 +385,9 @@
     if (data.final_answer) {
       const card = article.querySelector(".answer-card");
       card.hidden = false;
-      card.querySelector(".value").textContent = formatFinalAnswer(data.final_answer);
+      card.querySelector(".value").innerHTML = renderInline(
+        formatFinalAnswer(data.final_answer),
+      );
     }
 
     const related = createRelatedCard(data.related_problems);
@@ -535,7 +668,7 @@
 
     const sub = document.createElement("p");
     sub.className = "paper-title-sub";
-    sub.textContent = `共 ${Number(data.count || 0)} 道题 · 题干直接来自题库，未经模型改写`;
+    sub.textContent = `共 ${Number(data.count || 0)} 道题 · 题干来自题库，公式按本地重建缓存排版`;
     heading.appendChild(sub);
     titleRow.appendChild(heading);
 
@@ -588,9 +721,14 @@
         qHead.appendChild(source);
         item.appendChild(qHead);
 
-        const text = document.createElement("p");
+        const text = document.createElement("div");
         text.className = "paper-q-text";
-        text.textContent = problem.question || "";
+        if (problem.display_question) {
+          text.classList.add("rendered");
+          text.innerHTML = renderMarkdown(problem.display_question);
+        } else {
+          text.textContent = problem.question || "";
+        }
         item.appendChild(text);
 
         const tags = Array.isArray(problem.knowledge_points)

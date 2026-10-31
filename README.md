@@ -77,9 +77,11 @@ python -m web.app
 - 同一页面内支持追问：服务端保存"第一轮原题 + 最近 3 轮"，自动做上下文裁剪；
   追问时不会强制重复完整解题格式
 - 顶栏"新对话"会清空当前会话和页面消息，并回到解题模式
-- 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏
+- 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏；
+  题干使用 `display_question` 的 LaTeX 重建结果，和助手回答走同一套 KaTeX 管线
 - 真题模式：左侧列出第 1–16 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
-  点击后右侧显示该卷全部题干；题干直接来自题库，不经过模型改写
+  点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
+  缓存的 `display_question`，不额外调用模型
 - 显示耗时、轮次、模型调用次数、工具调用次数、token 用量
 - 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
 - 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
@@ -101,7 +103,8 @@ python -m web.app
 - `GET /api/papers`：第 1–16 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
 - `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
   读取一份试卷的完整题干；`edition` 与 `year` 二选一，
-  `supplement` 省略表示不限补赛、传空串表示只要正卷
+  `supplement` 省略表示不限补赛、传空串表示只要正卷。`question` 是题库原文，
+  `display_question` 是重建后的 Markdown + LaTeX（没有缓存时为空串）
 - `GET /api/health`：除模型状态外，还返回 `retriever`（auto/bm25/vector/hybrid）、
   `vector_available` 和 `embedding_model`，方便确认混合检索是否真的启用
 
@@ -121,6 +124,10 @@ python -m rag.build
 
 python -m rag.build_embeddings
 # 417 道 × 512 维，写入 data/processed/embeddings.npz
+
+python -m rag.latex
+# 用模型把题干重建为 Markdown + LaTeX，写入 data/processed/question_latex.json
+# 中途失败可重跑：按题目 id + 内容哈希跳过已完成项
 
 python -m rag.search "计算二重积分，其中D由x+y=1与两坐标轴围成" --top 3
 python -m rag.search "求幂级数的收敛域" --stage 初赛 --json
@@ -149,29 +156,41 @@ python -m rag.build --papers-dir "D:/papers" --out data/processed/problems.jsonl
 中文二元组分词 + 25 个受控知识点标签
    │
    ▼
-data/processed/problems.jsonl（题干 / 出处 / 届数 / 类别 / 知识点）
+data/processed/problems.jsonl
+（question / question_layout / 出处 / 届数 / 类别 / 知识点）
    ├─ BM25 索引（中文二元组 + 知识点加权）
-   └─ BGE 编码 → data/processed/embeddings.npz（417 × 512）
+   ├─ BGE 编码 → data/processed/embeddings.npz（417 × 512）
+   └─ python -m rag.latex → question_latex.json（display_question）
           │
 用户提问 ─┼─ BM25 Top-20 ─┐
           └─ BGE Top-20 ──┴─ RRF 融合 → Top-K
    │
-   ├─ Agent 工具 search_past_problems(query, k) → 题干 + 出处 + 知识点
-   └─ Web 返回 related_problems → 前端“相关真题”卡片
+   ├─ Agent 工具 search_past_problems(query, k) → 相似题题干 + 出处 + 知识点
+   ├─ Agent 工具 get_past_problem(届数/年份 + 题号/位置) → 指定题的完整题干
+   └─ Web 返回 related_problems / paper → 前端用 KaTeX 渲染 display_question
 ```
 
 设计取舍：
 
 - 题库没构建时，Web 端不开放检索工具，避免每轮都拿到“题库不存在”的工具错误。
-- 工具只返回题干、出处、知识点，不返回解答：工具结果会进模型上下文，需要控制
-  体积；完整解答留给后续的 `get_problem_detail`。
+- 检索工具只返回题干、出处、知识点，不返回解答：工具结果会进模型上下文，需要
+  控制体积；完整解答由 Agent 自己生成。
 - 提示词明确要求检索结果是“其他题目”，禁止把其中的数字和结论搬进本题解答；
   正文最多用一句话点出最相关的一道，不重复题干（前端已有卡片）。
+- “第七届初赛压轴题”这类输入不是题干，不能走相似度检索。`get_past_problem` 用
+  届数/年份、阶段、类别、题型和题号做确定定位，返回完整 `question`（优先展示用
+  LaTeX）；“压轴题/最后一题”由 `position="last"` 解析成该组最大题号。同届有多份
+  符合条件的试卷时返回 `candidates`，让模型先向用户确认初赛/决赛，不替用户猜。
 - 检索默认是 BM25 + BGE 向量 + RRF：BM25 负责公式和术语的精确词面命中，
   BGE 负责同义表述和语义查询，RRF 只看名次、不看两路分数的量纲。中文仍按
   二元组切分，不依赖词典；向量模型是 `BAAI/bge-small-zh-v1.5`（512 维，CPU）。
 - 向量缓存与题库、模型绑定：题号或模型变化后，工具层检测到不一致会自动回退
   BM25，不会拿旧向量硬搜新题库。
+- 展示用 LaTeX 在构建阶段生成一次并缓存，运行时零模型调用。PDF 的文字层把
+  分数压成上下两行、把上下标压成普通字符，仅靠正则无法还原；但 `question_layout`
+  保留了换行和字号（正文 12pt、上下标/分子分母 8pt），模型可以据此重建结构。
+  缓存按“题目 id + 题干 + layout + 提示词版本”的哈希校验，内容变化后自动失效；
+  缓存缺失或某题生成失败时，前端回退到原始纯文本，不会白屏或显示半截公式。
 - 追问（“这一步为什么”）不强制检索，也不做检索补位，避免拿追问去搜题库。
 
 ### BGE 向量与 RRF 混合检索
@@ -193,6 +212,9 @@ BM25 对公式、符号和术语很强，但用户只给语义描述时会漏召
 - `rag/build_embeddings.py`：为整库生成向量缓存；
 - `tools.search_past_problems`：按 `CMC_RETRIEVER` 选择 `auto`（默认）/
   `bm25` / `vector` / `hybrid`；模型缺失、依赖未安装、缓存过期时自动回退 BM25。
+- `tools.get_past_problem`：按届数/年份、阶段、类别、补赛、题型和题号做确定
+  定位；`position=last/first` 解析压轴题/第一题，返回完整题干（优先
+  `question_latex.json` 的展示版）。
 
 本机配置（`.env`，已被 gitignore）：
 
@@ -238,15 +260,19 @@ CMC_QUERY_PREFIX=
 
 实现要点：
 
-- **不经过模型**：题干直接从 `problems.jsonl` 读取，避免模型漏抄、改写，也避免
-  把整卷塞进上下文。
+- **原始题干不经过模型**：`question` 直接从 `problems.jsonl` 读取，避免模型漏抄、
+  改写，也避免把整卷塞进上下文。展示用的 `display_question` 来自构建阶段预生成
+  的缓存，读取接口本身不调用模型。
 - **去重别名展开**：建库时同一道题可能跨届重复，去重后只保留一条主记录，旧 id
   放进 `aliases`。按届浏览时会把 `[id, *aliases]` 逐个解析回原试卷位置，否则
   会出现“第 13 届决赛缺第 9 题”的假象。现在第 1–16 届的题号都是连续的。
 - **Agent 也能列卷**：聊天里说“我要第一届真题”时，模型调用 `list_past_problems`；
   工具只返回题号、出处和数量，Web 层再按同一组参数重新读题库补全题干。
+- **Agent 也能定位单题并解答**：聊天里说“第七届非数学 A 类初赛压轴题”时，模型
+  调用 `get_past_problem(edition=7, stage="初赛", category="A", position="last")`，
+  取回第 10 题的完整题干后直接作答，不需要用户重新粘贴。
 - **区分语义检索和元数据过滤**：届数、阶段、类别都是确定字段，过滤即可 100%
-  命中；向量检索只解决“题目意思相近”，不能替代按届浏览。
+  命中；向量检索只解决“题目意思相近”，不能替代按届浏览或定位单题。
 
 当前题库：417 道题，第 1 届 23 道、第 13 届 31 道、第 15 届 31 道、第 16 届 42 道；
 所有试卷分组均为题号连续。
@@ -255,7 +281,9 @@ CMC_QUERY_PREFIX=
 
 - 真题 PDF 有版权风险，`data/` 已加入 `.gitignore`；仓库里只有代码，不提交题库。
 - 2024/2025 两份试卷使用 Symbol 字体，抽出的公式会散架（如 `ZZ` 代表二重积分号），
-  题干适合检索但可读性一般；展示前需要模型重建 LaTeX。
+  题干适合检索但可读性一般；展示时读取 `question_latex.json` 的重建结果。
+- 重建缓存不是题库的一部分：修改题干或提示词后，重跑 `python -m rag.latex`
+  会按哈希自动补齐失效项；只想抽查时加 `--limit 20`。
 - 2018 年以前的试卷不分 A/B 类，统一标为“未分类”；检索 A 类时会把它们一并算入。
 - 2024/2025 两份试卷按卷面结构切分，其余按“题目N”切分。
 
@@ -384,16 +412,17 @@ mathcoach/
 │   ├── vector.py       # BGE 编码、向量缓存、余弦 Top-K
 │   ├── hybrid.py       # RRF 融合、BM25 + BGE 混合检索
 │   ├── build_embeddings.py # 为整库构建向量缓存
+│   ├── latex.py        # 题干 -> Markdown + LaTeX 重建与缓存
 │   ├── evaluate.py     # 检索评测：Recall@1 / Recall@5 / MRR
 │   ├── eval_queries.jsonl  # 47 条标注查询
 │   └── search.py       # 命令行检索
-├── data/               # 题库产物 problems.jsonl（已 gitignore）
+├── data/               # 题库产物 problems.jsonl / question_latex.json（已 gitignore）
 ├── web/
 │   ├── app.py          # FastAPI 后端：/api/ask、/api/papers、/api/paper
 │   ├── sessions.py     # 内存会话、TTL、上下文裁剪
 │   ├── test_app.py
 │   ├── test_sessions.py
-│   └── static/         # 单页前端；KaTeX / markdown-it / DOMPurify 本地化
+│   └── static/         # 单页前端；KaTeX / marked / DOMPurify 本地化
 ├── eval/
 │   ├── cases.jsonl     # 24 道评测题
 │   ├── judge.py        # symbolic / numeric / exact 判定

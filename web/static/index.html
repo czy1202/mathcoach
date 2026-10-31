@@ -6,8 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>mathcoach · 数学竞赛解题助手</title>
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="/static/vendor/markdown-it-texmath/texmath.css">
-  <link rel="stylesheet" href="/static/styles.css?v=20261030">
+  <link rel="stylesheet" href="/static/styles.css?v=20261101">
 </head>
 <body>
   <div class="page">
@@ -40,7 +39,7 @@
           <button type="button" class="mode-card" data-mode="solve">
             <span class="mode-card-icon">∑</span>
             <span class="mode-card-title">问题目</span>
-            <span class="mode-card-text">输入题目，Agent 会给出知识点、思路、完整步骤，并用 sympy 验证关键计算。</span>
+            <span class="mode-card-text">输入题目，Agent 会给出知识点、思路、完整步骤，并用 sympy 验证关键计算；也可以直接说“第七届初赛压轴题”。</span>
             <span class="mode-card-arrow">开始解题 →</span>
           </button>
           <button type="button" class="mode-card" data-mode="papers">
@@ -66,6 +65,7 @@
           <button type="button" data-q="求 ∫_0^1 x e^x dx">求积分：<span>∫₀¹ x eˣ dx</span></button>
           <button type="button" data-q="求 y = x^2 sin x 的导数">求导数：<span>y = x² sin x</span></button>
           <button type="button" data-q="已知 a_{n+1}=2a_n+1，求通项公式">缺条件题：<span>递推数列</span></button>
+          <button type="button" data-q="第七届全国大学生数学竞赛非数学类初赛压轴题">按届找题：<span>第七届初赛压轴题</span></button>
         </div>
         <p class="welcome-note">本地演示 · 回答由 AI 生成 · 关键计算已交给工具验证</p>
       </section>
@@ -100,7 +100,7 @@
           id="question"
           rows="1"
           maxlength="5000"
-          placeholder="输入题目，例如：计算 lim(x→0) (tan x - sin x)/x^3"
+          placeholder="输入题目，或按届找题，例如：第七届非数学类初赛压轴题"
           aria-label="题目"
         ></textarea>
         <button id="send" type="submit" aria-label="发送">
@@ -113,19 +113,8 @@
   </div>
 
   <script src="/static/vendor/katex/katex.min.js"></script>
-  <script src="/static/vendor/markdown-it/markdown-it.umd.min.js"></script>
-  <script>
-    // markdown-it-texmath 只提供 CommonJS 导出，浏览器里用一个临时 shim 接住它
-    window.module = { exports: {} };
-    window.exports = window.module.exports;
-  </script>
-  <script src="/static/vendor/markdown-it-texmath/texmath.js"></script>
-  <script>
-    window.texmath = window.module.exports;
-    delete window.module;
-    delete window.exports;
-  </script>
+  <script src="/static/vendor/marked/marked.umd.js"></script>
   <script src="/static/vendor/dompurify/purify.min.js"></script>
-  <script src="/static/app.js?v=20261030"></script>
+  <script src="/static/app.js?v=20261102"></script>
 </body>
 </html>
