@@ -6,7 +6,12 @@
 
 import pytest
 
-from eval.judge import judge_answer
+from eval.judge import (
+    extract_labeled_value,
+    judge_answer,
+    judge_parts,
+    judge_rubric,
+)
 from schemas import Verdict
 
 
@@ -54,6 +59,17 @@ def test_symbolic_latex_and_unicode_pass(actual):
 def test_symbolic_frac_shorthand_pass():
     """\\frac16 这种简写也应能解析。"""
     assert judge_answer("1/6", r"\frac16", "symbolic") is Verdict.PASS
+
+
+def test_symbolic_nested_latex_pass():
+    """真题答案里的嵌套分式、\\sqrt2 简写都要能解析。"""
+    assert judge_answer("1/sqrt(2)", r"\frac{1}{\sqrt2}", "symbolic") is Verdict.PASS
+    assert judge_answer(
+        "(sqrt(3)-1)/2",
+        r"\frac{\sqrt3-1}{2}",
+        "symbolic",
+    ) is Verdict.PASS
+    assert judge_answer("(2-sqrt(2))/6", r"\frac13\left(1-\frac{\sqrt2}{2}\right)", "symbolic") is Verdict.PASS
 
 
 @pytest.mark.parametrize("actual", ["1/3", "0", "x + 1"])
@@ -111,6 +127,84 @@ def test_exact_match_pass(actual):
 def test_exact_match_fail(actual):
     """字面不同就应失败，即使数学上等价。"""
     assert judge_answer("1/2", actual, "exact") is Verdict.FAIL
+
+
+# ---------- point：坐标点 ----------
+
+@pytest.mark.parametrize("actual", [
+    "(1/sqrt(2), 1/2)",
+    r"\left(\frac{\sqrt2}{2},\ \frac12\right)",
+    r"x=\frac{\sqrt2}{2}, y=\frac12",
+])
+def test_point_pass(actual):
+    """坐标点的等价写法都应通过。"""
+    assert judge_answer("(1/sqrt(2), 1/2)", actual, "point") is Verdict.PASS
+
+
+def test_point_fail_and_uncertain():
+    assert judge_answer("(1/sqrt(2), 1/2)", "(1, 1/2)", "point") is Verdict.FAIL
+    assert judge_answer("(1/sqrt(2), 1/2)", "只有一个数", "point") is Verdict.UNCERTAIN
+
+
+# ---------- parts：多小问 ----------
+
+PARTS = [
+    {"labels": ["f(0)"], "answer": "-3", "judge": "symbolic"},
+    {"labels": ["f'(0)"], "answer": "0", "judge": "symbolic"},
+    {"labels": ["f''(0)"], "answer": "9", "judge": "symbolic"},
+]
+
+
+def test_extract_labeled_value_handles_latex_spacing():
+    text = r"最终答案：$f(0)=-3,\ f'(0)=0,\ f''(0)=9$"
+    assert extract_labeled_value(text, ["f(0)"]) == "-3"
+    assert extract_labeled_value(text, ["f''(0)"]) == "9"
+
+
+def test_parts_all_pass():
+    text = r"最终答案：$f(0)=-3,\ f'(0)=0,\ f''(0)=9$"
+    assert judge_parts(PARTS, text) is Verdict.PASS
+
+
+def test_parts_missing_subanswer_is_uncertain():
+    text = "最终答案：f(0)=-3，f'(0)=0"
+    assert judge_parts(PARTS, text) is Verdict.UNCERTAIN
+
+
+def test_parts_wrong_subanswer_fails():
+    text = "最终答案：f(0)=-3，f'(0)=1，f''(0)=9"
+    assert judge_parts(PARTS, text) is Verdict.FAIL
+
+
+# ---------- rubric：证明题关键步骤 ----------
+
+RUBRIC = [
+    {"label": "辅助函数", "any": ["e\\*\\*\\(-x\\)", "exp\\(-x\\)"]},
+    {"label": "单调递减", "any": ["单调递减", "单调减少"]},
+    {"label": "结论", "any": ["F\\(x\\)(≥|>=)0"]},
+]
+
+
+def test_rubric_all_steps_pass():
+    text = r"令 $G(x)=e^{-x}F(x)$，可得 $G(x)$ 单调递减，故 $F(x)\ge 0$。"
+    assert judge_rubric(RUBRIC, text) is Verdict.PASS
+
+
+def test_rubric_missing_step_fails():
+    text = r"令 $G(x)=e^{-x}F(x)$，故 $F(x)\ge 0$。"
+    assert judge_rubric(RUBRIC, text) is Verdict.FAIL
+
+
+def test_rubric_empty_answer_fails():
+    assert judge_rubric(RUBRIC, "") is Verdict.FAIL
+    assert judge_rubric(RUBRIC, None) is Verdict.FAIL
+
+
+def test_rubric_keeps_function_name_case():
+    """F(x) 和 f(x) 是不同函数，不能因为大小写归一化而互相顶替。"""
+    checks = [{"any": ["F\\(x\\)≥0"]}]
+    assert judge_rubric(checks, "f(x)≥0") is Verdict.FAIL
+    assert judge_rubric(checks, "F(x)≥0") is Verdict.PASS
 
 
 # ---------- 统一入口的边界情况 ----------

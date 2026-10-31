@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>mathcoach · 数学竞赛解题助手</title>
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="/static/styles.css?v=20261101">
+  <link rel="stylesheet" href="/static/styles.css?v=20261104">
 </head>
 <body>
   <div class="page">
@@ -15,7 +15,7 @@
         <button type="button" class="brand-mark" id="home-btn" title="返回模式选择" aria-label="返回模式选择">∑</button>
         <div class="brand-text">
           <h1>mathcoach</h1>
-          <p>CMC / 考研数学 · 会调用工具验证的解题助手</p>
+          <p>CMC宝典</p>
         </div>
       </div>
       <div class="topbar-actions">
@@ -112,9 +112,35 @@
     </footer>
   </div>
 
+  <div class="step-backdrop" id="step-backdrop" hidden></div>
+  <aside class="step-panel" id="step-panel" hidden aria-label="针对步骤提问">
+    <header class="step-panel-head">
+      <div>
+        <p class="eyebrow">STEP · ASK</p>
+        <h2 id="step-panel-title">问这一步</h2>
+      </div>
+      <button type="button" class="step-close" id="step-close" aria-label="关闭步骤追问">×</button>
+    </header>
+    <div class="step-quote" id="step-quote"></div>
+    <div class="step-thread" id="step-thread" role="log" aria-live="polite"></div>
+    <form class="step-composer" id="step-form" autocomplete="off">
+      <textarea
+        id="step-question"
+        rows="1"
+        maxlength="5000"
+        placeholder="针对这一步提问，例如：为什么要这样换元？"
+        aria-label="针对这一步提问"
+      ></textarea>
+      <button type="submit" id="step-send">
+        <span class="send-arrow">↑</span>
+        <span class="send-label">发送</span>
+      </button>
+    </form>
+  </aside>
+
   <script src="/static/vendor/katex/katex.min.js"></script>
   <script src="/static/vendor/marked/marked.umd.js"></script>
   <script src="/static/vendor/dompurify/purify.min.js"></script>
-  <script src="/static/app.js?v=20261102"></script>
+  <script src="/static/app.js?v=20261104"></script>
 </body>
 </html>

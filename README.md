@@ -19,7 +19,8 @@
   本题的条件；检索用 BM25 + BGE 向量 + RRF
 - 拒答：题干信息不全，或题目本身是未解决猜想时，说明原因并请用户补充，
   不引入假设硬答
-- 成功标准：24 道评测题（20 道求解 + 4 道应拒答），总通过率 ≥ 70%
+- 成功标准：2024、2025 两年 CMC 真题共 34 题（每年 6 填空 + 6 选择 +
+  5 解答），总通过率 ≥ 70%
 - 暂不实现：拍照识题、cross-encoder rerank
 
 ## 快速开始
@@ -47,7 +48,7 @@ python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 229 个测试
+pytest                              # 296 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -76,6 +77,8 @@ python -m web.app
 - 解题模式：回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
 - 同一页面内支持追问：服务端保存"第一轮原题 + 最近 3 轮"，自动做上下文裁剪；
   追问时不会强制重复完整解题格式
+- 完整解答按 `### 第一步：...` 切成步骤卡片；点击「问这一步」打开右侧独立抽屉，
+  只围绕当前步骤追问。侧栏使用单独会话，消息不会写进主对话，也不会改变主对话轮次
 - 顶栏"新对话"会清空当前会话和页面消息，并回到解题模式
 - 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏；
   题干使用 `display_question` 的 LaTeX 重建结果，和助手回答走同一套 KaTeX 管线
@@ -98,7 +101,12 @@ python -m web.app
 
 - `POST /api/ask`：请求体 `{question, session_id?}`；首次提问不传 `session_id`，
   响应会返回服务端生成的 id，后续追问带同一个 id。如果模型调用了
-  `list_past_problems`，响应会额外带上完整试卷 `paper`
+  `list_past_problems`，响应会额外带上完整试卷 `paper`；完整解答还会返回
+  `turn_id`（稳定定位本轮回答）和 `solution`（`intro` / `steps` / `outro`）
+- `POST /api/ask-step`：针对某一轮回答中的某一步追问。请求体为
+  `{question, parent_session_id, parent_turn_id?, parent_turn?, step_index,
+  step_text?, step_session_id?}`；响应只包含这一步的短回答和独立的
+  `step_session_id`，不会修改主会话
 - `DELETE /api/session/{session_id}`：结束会话，"新对话"按钮会调用
 - `GET /api/papers`：第 1–16 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
 - `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
@@ -336,31 +344,44 @@ python -m rag.evaluate --no-vector  # 只跑 BM25 两组，不加载模型
 
 ## 评测结果
 
-评测集 24 题：20 道求解（symbolic / numeric / exact 三种判分方式）+ 4 道
-应拒答。求解题先提取 `最终答案：` 行，再做符号等价 / 数值容差 / 精确匹配；
-拒答题检查回答是否明确表示无法作答。
+评测集固定为 2024、2025 两年 CMC 非数学类真题，题目与标准答案均取自
+`2024答案版.pdf` / `2025答案版.pdf`，填空和选择的题干取自对应试卷版。
+每年 6 道填空 + 6 道选择 + 5 道解答，共 34 题。旧版 24 道自拟题的结果
+已全部作废，不再作为准确率依据。
 
-| 版本 | 主要改动 | solve | refuse | 总计 |
+判分方式：
+
+- 填空 / 选择：提取 `最终答案：` 行后做符号等价、数值容差、精确匹配或
+  坐标点判定；
+- 多小问解答：`parts` 按小问分别抽取、分别判分，全部正确才算该题通过；
+- 证明题：`rubric` 按官方解答的关键步骤清单判分。它只能检查关键结论有没有
+  写出来，不能替代人工阅卷，因此证明题的通过/失败要结合原始回答复核。
+
+| 运行 | 判分器状态 | 2024 | 2025 | 总计 |
 | --- | --- | --- | --- | --- |
-| v1 | 初始提示词，整段回答直接判分 | 17/20 | 3/4 | 20/24（83.3%） |
-| v2 | 最终答案契约 + 提取器 + LaTeX/Unicode 归一化 | 19/20 | 3/4 | 22/24（91.7%） |
-| v3 | 修复 `2x\sin x` 的函数边界；扩充拒答标志 | 20/20 | 3/4 | 23/24（95.8%） |
-| v4 | 补充"无法证明 / 未解决"类拒答标志 | 19/20 | 4/4 | 23/24（95.8%） |
-| v5 | 修复 `\operatorname{...}` 的答案提取 | 20/20 | 4/4 | **24/24（100%）** |
+| 第 1 次 | rubric 修正前 | 12/17（70.6%） | 15/17（88.2%） | 27/34（79.4%） |
+| 第 2 次 | 修正 2025-J3 的 rubric 误判；提取器仍有 2025-F4 问题 | 10/17（58.8%） | 13/17（76.5%） | 23/34（67.6%） |
+| 第 3 次 | 再修正 2025-F4 的答案提取（当前基线） | 14/17（82.4%） | 12/17（70.6%） | 26/34（76.5%） |
 
-v4 的 1 道 solve 记为 UNCERTAIN，原因是提取器不认识
-`\operatorname{Var}(X)=1/12`；修复后回放同一份模型回答判为 PASS，v5 是
-修复后的完整真实运行。
+三次运行平均 25.3/34（74.5%），范围 23–27/34（67.6%–79.4%）；
+按年份看，2024 卷在 10–14/17 之间，2025 卷在 12–15/17 之间。
+同一套题、同一份代码的波动就有 3–4 题，因此单次分数不能当作稳定准确率。
 
-v5 轨迹指标：
+第 3 次（当前基线）未通过的 8 题：
 
-- 耗时：总计 97.99 秒，平均 4.08 秒/题，p95 9.17 秒
-- token：50,237（输入 37,646 / 输出 12,591），平均 2,093/题
-- 调用：模型 53 次，工具 48 次，工具错误 0 次（0.0%）
-- 护栏触发：0 次（无超时、无超步数、无模型异常）
+- 4 题是 Agent 达到最大步数 10 后停止，未给出最终答案：2024-F5、2024-J4、
+  2025-J2、2025-J5。这是目前最主要的失败来源。
+- 3 题是模型数学错误：2024-C1（答 A，正确 D）、2025-F6（答 `sqrt(ln 2)`，
+  正确 `2*sqrt(ln 2)`）、2025-C5（答 D，正确 C）。
+- 1 题是证明题 rubric 未命中：2025-J3 的替代证明把“非负多项式”误写成
+  单个多项式的平方，按偏保守的标准判为失败，需要人工复核。
 
-> 注意：24 道题、单次运行的样本量都很小，100% 不代表模型已经稳定可靠。
-> 后续扩题、多次运行取均值后，这组数字才适合做更严格的结论。
+前两次运行还有两个已修复的判分问题：第 1 次的 2025-J3 是有效替代证明被
+rubric 误杀；第 2 次的 2025-F4 答案本身正确（`ne`），但提取器没有清洗
+`$` 和末尾的 `(n≥1)`，被判成“不确定”。
+
+> 注意：34 道题、三次运行的样本量仍然很小，且证明题是启发式判分。
+> 这组数字用于版本间回归对比，不应被解读为模型在真实考试中的得分。
 
 ## 工作原理
 
@@ -384,8 +405,10 @@ cases.jsonl
    │
    ▼
 Agent（注入 TraceRecorder）
-   ├─ 正常回答 → extract_final_answer → judge_answer → PASS/FAIL/UNCERTAIN
-   └─ 应拒答   → is_refusal → 正确拒答/未拒答
+   ├─ 填空 / 选择 → extract_final_answer → judge_answer → PASS/FAIL/UNCERTAIN
+   ├─ 多小问     → extract_final_answer → judge_parts 逐项判定
+   ├─ 证明题     → judge_rubric 检查官方解答的关键步骤
+   └─ 应拒答     → is_refusal → 正确拒答/未拒答
    │
    ├─ traces/*.jsonl（逐题事件、token、耗时、工具调用）
    └─ 控制台报告 + trace_report 汇总
@@ -400,6 +423,7 @@ mathcoach/
 ├── llm.py              # OpenAI 兼容客户端 + StubClient（同一接口）
 ├── tools.py            # sympy 验证 + 真题检索/列卷工具、注册表、run_tool 分派
 ├── mathparse.py        # LaTeX / Unicode / 省略乘号的统一归一化
+├── solution.py         # 把完整解答切成 intro / 可点击步骤 / outro
 ├── tracing.py          # TraceRecorder：逐题写 JSONL
 ├── schemas.py          # Verdict 等数据结构
 ├── config.py           # 读取 .env
@@ -418,20 +442,21 @@ mathcoach/
 │   └── search.py       # 命令行检索
 ├── data/               # 题库产物 problems.jsonl / question_latex.json（已 gitignore）
 ├── web/
-│   ├── app.py          # FastAPI 后端：/api/ask、/api/papers、/api/paper
+│   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-step、/api/papers、/api/paper
 │   ├── sessions.py     # 内存会话、TTL、上下文裁剪
 │   ├── test_app.py
 │   ├── test_sessions.py
 │   └── static/         # 单页前端；KaTeX / marked / DOMPurify 本地化
 ├── eval/
-│   ├── cases.jsonl     # 24 道评测题
-│   ├── judge.py        # symbolic / numeric / exact 判定
+│   ├── cases.jsonl     # 2024/2025 CMC 真题 34 题（答案取自两份答案版）
+│   ├── judge.py        # symbolic / numeric / exact / point / parts / rubric 判定
 │   ├── extract.py      # 从回答里提取"最终答案："
 │   ├── run_eval.py     # 跑批、自检、报告
 │   └── trace_report.py # 轨迹汇总
 ├── test_agent.py
 ├── test_ask.py
 ├── test_rag.py
+├── test_solution.py    # 分步解答解析（标题、代码块、乱序编号）
 ├── test_vector.py      # 向量索引、RRF、工具回退
 ├── test_tools.py
 └── traces/             # 评测与问答轨迹（已 gitignore）
@@ -444,7 +469,10 @@ mathcoach/
   输出；接入真实用户输入前，需要换成受限命名空间或独立的沙箱解析。
 - 拒答识别仍是关键词匹配，措辞变化可能误判。后续计划换成 LLM-as-judge，
   并用混淆矩阵评估。
-- 评测集只有 24 题，且每版只跑一次，无法反映模型波动。
+- 评测集固定为 2024、2025 两套真题，共 34 题且每版只跑一次，仍无法反映模型
+  波动；证明题按关键步骤清单判分，属于启发式，不能替代人工阅卷。
+- `eval/cases.jsonl` 的题干和答案转录自本地真题 PDF，仅用于本地评测，
+  不建议公开分发。
 - Web 版没有登录、限流和公网部署方案，只适合本机演示。
 - 多轮会话只存在服务端内存：服务重启丢失；刷新页面会开始新对话；没有跨会话的
   长期记忆。
@@ -458,7 +486,8 @@ mathcoach/
 
 ## 下一步
 
-1. 扩充解题评测集，覆盖证明题、选择题和更多拒答措辞；引入多次运行与方差统计。
+1. 对 2024/2025 两套真题做多次运行并统计方差；再补充 2023 年及更早年份，
+   逐步把“两套卷”扩成跨年份的固定基准。
 2. 复核并冻结 47 条检索评测（重点看 hard 集），补更多同义改写和短查询；
    把当前 BM25 / BGE / RRF 数字固定为正式基线，避免继续在同一组查询上调参。
 3. 在冻结的留出集上验证 RRF 收益；针对 h01 这类失败样本尝试 cross-encoder

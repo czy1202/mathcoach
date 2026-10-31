@@ -42,6 +42,11 @@ def test_standard_answers(text, want):
     ("最终答案：1/2。", "1/2"),
     (r"最终答案：\(y'=2x\sin x+x^2\cos x\)", "2x sin x+x^2 cos x"),
     (r"最终答案：\(\operatorname{Var}(X)=\dfrac{1}{12}\)", "((1)/(12))"),
+    # 2025-F4 的真实回答：$ 只包住等式前半段，后面还跟着附加条件
+    (r"最终答案：$f^{(n)}(1)=ne$（$n\ge 1$）", "ne"),
+    ("最终答案：f(n)=n^2 (n≥1)", "n^2"),
+    # 坐标点末尾的括号是答案本身，不能被当成附加条件删掉
+    ("最终答案：(1/2, 1/2)", "(1/2, 1/2)"),
 ])
 def test_cleaning(text, want):
     assert extract_final_answer(text) == want

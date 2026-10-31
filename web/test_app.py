@@ -22,8 +22,10 @@ client = TestClient(web_app.app)
 def _clear_sessions():
     """每个测试从空会话开始，避免全局存储互相污染。"""
     web_app.SESSIONS.clear()
+    web_app.STEP_SESSIONS.clear()
     yield
     web_app.SESSIONS.clear()
+    web_app.STEP_SESSIONS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -439,6 +441,184 @@ def test_followup_without_marker_has_no_answer_card(monkeypatch, tmp_path):
     assert second["follow_up"] is True
     assert second["final_answer"] is None
     assert "分部积分" in second["display_answer"]
+
+
+# ---------- 分步解答与步骤追问 ----------
+
+FULL_SOLUTION = """## 涉及的知识点
+
+- 分部积分
+
+## 解题思路
+
+先求原函数，再代入上下限。
+
+## 分步解题过程
+
+### 第一步：求原函数
+
+由分部积分得 $\\int x e^x\\,dx = (x-1)e^x + C$。
+
+### 第二步：代入上下限
+
+所以 $\\int_0^1 x e^x\\,dx = 1$。
+
+## 最终答案
+
+最终答案：$1$
+"""
+
+
+class SolutionClient:
+    """主对话返回带步骤的完整解答，侧栏返回只解释某一步的短回答。"""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.requests: list[list[dict]] = []
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        self.requests.append([dict(message) for message in messages])
+        if self.calls == 1:
+            return LLMResponse(content=FULL_SOLUTION)
+        return LLMResponse(
+            content="因为 $x e^x$ 是多项式乘指数函数，所以用分部积分。"
+        )
+
+
+def _step_payload(parent: dict, **overrides) -> dict:
+    payload = {
+        "question": "这一步为什么想到分部积分？",
+        "parent_session_id": parent["session_id"],
+        "parent_turn_id": parent["turn_id"],
+        "parent_turn": parent["turn"],
+        "step_index": 1,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def test_ask_returns_parsed_solution_steps(monkeypatch, tmp_path):
+    """完整解答应带上前端可点击的步骤结构。"""
+    model = SolutionClient()
+    monkeypatch.setattr(web_app, "_client", model)
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post("/api/ask", json={"question": "求积分"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["turn_id"]
+    assert data["solution"]["intro"].startswith("## 涉及的知识点")
+    assert [step["label"] for step in data["solution"]["steps"]] == [
+        "第一步", "第二步",
+    ]
+    assert [step["title"] for step in data["solution"]["steps"]] == [
+        "求原函数", "代入上下限",
+    ]
+    assert "## 最终答案" not in data["solution"]["steps"][-1]["markdown"]
+    assert data["solution"]["outro"] == ""
+
+
+def test_ask_step_does_not_touch_main_session(monkeypatch, tmp_path):
+    """侧栏追问只能写 STEP_SESSIONS，不能改变主对话的消息和轮次。"""
+    model = SolutionClient()
+    monkeypatch.setattr(web_app, "_client", model)
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    parent = client.post("/api/ask", json={"question": "求积分"}).json()
+    session = web_app.SESSIONS.get(parent["session_id"])
+    before = list(session.turns)
+
+    response = client.post("/api/ask-step", json=_step_payload(parent))
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "分部积分" in data["display_answer"]
+    assert data["step_label"] == "第一步"
+    assert data["step_session_id"]
+    assert list(session.turns) == before
+
+    thread = web_app.STEP_SESSIONS.get(data["step_session_id"])
+    assert thread is not None
+    assert len(thread.turns) == 2  # 一条阅读材料 + 一条真实追问
+    assert thread.turns[1]["question"].startswith("请只针对我下面引用的步骤作答")
+
+    # 送给模型的最后一条消息要带引用步骤和用户问题
+    step_request = model.requests[-1]
+    assert "【引用步骤】" in step_request[-1]["content"]
+    assert "求原函数" in step_request[-1]["content"]
+    assert "这一步为什么想到分部积分" in step_request[-1]["content"]
+
+
+def test_ask_step_thread_can_continue(monkeypatch, tmp_path):
+    """同一个 step_session_id 可以继续追问，仍然不进入主会话。"""
+    model = SolutionClient()
+    monkeypatch.setattr(web_app, "_client", model)
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    parent = client.post("/api/ask", json={"question": "求积分"}).json()
+    first = client.post("/api/ask-step", json=_step_payload(parent)).json()
+    main_turns = list(web_app.SESSIONS.get(parent["session_id"]).turns)
+
+    second = client.post("/api/ask-step", json=_step_payload(
+        parent,
+        question="再解释得细一点",
+        step_session_id=first["step_session_id"],
+    )).json()
+
+    assert second["step_session_id"] == first["step_session_id"]
+    assert second["turn"] == 2
+    assert len(web_app.STEP_SESSIONS.get(second["step_session_id"]).turns) == 3
+    assert list(web_app.SESSIONS.get(parent["session_id"]).turns) == main_turns
+
+
+def test_ask_step_falls_back_to_parent_turn(monkeypatch, tmp_path):
+    """旧前端没有 turn_id 时，仍可用主对话轮次定位回答。"""
+    model = SolutionClient()
+    monkeypatch.setattr(web_app, "_client", model)
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    parent = client.post("/api/ask", json={"question": "求积分"}).json()
+    payload = _step_payload(parent, parent_turn_id=None, parent_turn=1)
+
+    response = client.post("/api/ask-step", json=payload)
+
+    assert response.status_code == 200
+
+
+def test_ask_step_rejects_unknown_parent(monkeypatch, tmp_path):
+    monkeypatch.setattr(web_app, "_client", SolutionClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post("/api/ask-step", json={
+        "question": "这一步为什么？",
+        "parent_session_id": "0" * 32,
+        "parent_turn": 1,
+        "step_index": 1,
+    })
+
+    assert response.status_code == 404
+    assert "原对话已过期" in response.json()["detail"]
+
+
+def test_ask_step_uses_fallback_text_when_no_headings(monkeypatch, tmp_path):
+    """回答没有步骤标题时，用前端传来的步骤原文仍然可以追问。"""
+    monkeypatch.setattr(web_app, "_client", PlainFollowupClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    parent = client.post("/api/ask", json={"question": "原题"}).json()
+    assert parent["solution"] is None
+
+    response = client.post("/api/ask-step", json={
+        "question": "这里为什么？",
+        "parent_session_id": parent["session_id"],
+        "parent_turn_id": parent["turn_id"],
+        "step_index": 1,
+        "step_text": "完整解答中的第一行推导",
+    })
+
+    assert response.status_code == 200
 
 
 # ---------- 展示辅助函数 ----------

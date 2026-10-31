@@ -28,6 +28,7 @@ from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
 from rag.latex import LatexStore
+from solution import extract_solution_steps
 from tools import (
     index_available,
     load_problem_index,
@@ -67,6 +68,15 @@ _client = None
 _client_lock = threading.Lock()
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 SESSIONS = SessionStore()
+
+# 步骤追问有自己独立的短对话，绝不能写进主会话，否则主对话会出现
+# “用户问：这一步为什么”这种没有上下文的孤立消息。
+STEP_SESSIONS = SessionStore(
+    max_sessions=200,
+    max_history_turns=4,
+    max_history_chars=24000,
+    max_assistant_chars=4000,
+)
 
 
 def get_client():
@@ -126,6 +136,18 @@ class AskRequest(BaseModel):
         max_length=64,
         description="服务端返回的会话 id；首次提问不传",
     )
+
+
+class StepAskRequest(BaseModel):
+    """针对主对话中某一个解答步骤的提问。"""
+
+    question: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
+    parent_session_id: str = Field(..., max_length=64)
+    parent_turn_id: str | None = Field(default=None, max_length=64)
+    parent_turn: int | None = Field(default=None, ge=1)
+    step_index: int = Field(..., ge=1)
+    step_text: str = Field(default="", max_length=20000)
+    step_session_id: str | None = Field(default=None, max_length=64)
 
 
 class StepInfo(BaseModel):
@@ -215,10 +237,24 @@ class PaperResponse(BaseModel):
     groups: list[PaperGroup] = Field(default_factory=list)
 
 
+class SolutionStep(BaseModel):
+    index: int
+    label: str = ""
+    title: str = ""
+    markdown: str = ""
+
+
+class SolutionBreakdown(BaseModel):
+    intro: str = ""
+    steps: list[SolutionStep] = Field(default_factory=list)
+    outro: str = ""
+
+
 class AskResponse(BaseModel):
     answer: str
     display_answer: str
     session_id: str
+    turn_id: str | None = None
     turn: int = 1
     follow_up: bool = False
     final_answer: str | None = None
@@ -233,6 +269,27 @@ class AskResponse(BaseModel):
     tools: list[ToolInfo] = Field(default_factory=list)
     related_problems: list[RelatedProblem] = Field(default_factory=list)
     paper: PaperResponse | None = None
+    solution: SolutionBreakdown | None = None
+
+
+class StepAskResponse(BaseModel):
+    """步骤侧栏的一次回答；刻意不返回 final_answer / related / paper。"""
+
+    answer: str
+    display_answer: str
+    step_session_id: str
+    step_index: int = 1
+    step_label: str = ""
+    turn: int = 1
+    error: str | None = None
+    elapsed: float = 0.0
+    llm_calls: int = 0
+    tool_calls: int = 0
+    tool_errors: int = 0
+    tokens: int = 0
+    trace_file: str | None = None
+    steps: list[StepInfo] = Field(default_factory=list)
+    tools: list[ToolInfo] = Field(default_factory=list)
 
 
 # ---------- 纯函数 ----------
@@ -293,6 +350,80 @@ def asks_for_more_info(text: str | None) -> bool:
     否则“请确认初赛还是决赛第 10 题”会被误抽成最终答案。
     """
     return bool(_CLARIFY_RE.search(text or ""))
+
+
+def parse_solution(answer: str) -> SolutionBreakdown | None:
+    """把展示文本解析成前端可点击的步骤；识别不到时返回 None。"""
+    parsed = extract_solution_steps(answer)
+    if not parsed or not parsed.get("steps"):
+        return None
+    return SolutionBreakdown(**parsed)
+
+
+def find_solution_step(
+    answer: str,
+    index: int,
+    fallback_text: str = "",
+) -> tuple[dict, SolutionBreakdown | None] | None:
+    """按顺序取第 index 步；解析失败时退回前端传来的步骤原文。
+
+    优先用服务端解析结果，避免浏览器里的文本被截断或改写后，模型看到
+    的“引用步骤”和实际回答不一致。
+    """
+    solution = parse_solution(answer)
+    if solution and 1 <= index <= len(solution.steps):
+        step = solution.steps[index - 1]
+        return step.model_dump(), solution
+
+    fallback = (fallback_text or "").strip()
+    if fallback:
+        return {
+            "index": index,
+            "label": f"第{index}步",
+            "title": "",
+            "markdown": fallback[:12000],
+        }, solution
+    return None
+
+
+def build_step_seed(
+    original_question: str,
+    turn_question: str,
+    answer: str,
+) -> str:
+    """给步骤追问会话的第一次“阅读材料”，只存在侧栏会话里。"""
+    parts = ["这是主对话里的一道题和完整解答，请把它作为后续追问的背景。"]
+    if original_question:
+        parts.append(f"【原题】\n{original_question}")
+    if turn_question and turn_question != original_question:
+        parts.append(f"【本轮问题】\n{turn_question}")
+
+    body = answer
+    if len(body) > 8000:
+        body = body[:8000] + "\n…（后文省略）…"
+    parts.append(f"【完整解答】\n{body}")
+    return "\n\n".join(parts)
+
+
+def build_step_question(
+    question: str,
+    parent_turn: int,
+    step: dict,
+) -> str:
+    """构造只针对某一步的提问，并把步骤原文作为引用带上。"""
+    label = str(step.get("label") or f"第{step.get('index', 1)}步")
+    title = str(step.get("title") or "").strip()
+    heading = f"{label}：{title}" if title else label
+    step_text = str(step.get("markdown") or "")[:12000]
+
+    return (
+        "请只针对我下面引用的步骤作答，不要重新解整题，"
+        "也不要输出“最终答案：”行。可以解释这一步的动机、依据、"
+        "计算细节或常见误区。\n\n"
+        f"主对话第 {parent_turn} 轮解答中的{heading}：\n"
+        f"【引用步骤】\n{step_text}\n【引用结束】\n\n"
+        f"我的问题：{question}"
+    )
 
 
 def _parse_hits(raw: object) -> list[dict]:
@@ -641,15 +772,20 @@ def ask(req: AskRequest) -> AskResponse:
             if error is None and answer.startswith("错误："):
                 error = answer
 
+            display_answer = strip_answer_marker(
+                normalize_math_delimiters(answer)
+            )
+            solution = parse_solution(display_answer)
+
+            turn_id = None
             if error is None:
-                SESSIONS.append_turn(session, question, answer)
+                turn_id = SESSIONS.append_turn(session, question, answer)
 
             return AskResponse(
                 answer=answer,
-                display_answer=strip_answer_marker(
-                    normalize_math_delimiters(answer)
-                ),
+                display_answer=display_answer,
                 session_id=session.id,
+                turn_id=turn_id,
                 turn=turn,
                 follow_up=follow_up,
                 final_answer=final_answer,
@@ -669,9 +805,166 @@ def ask(req: AskRequest) -> AskResponse:
                     follow_up=follow_up,
                 ),
                 paper=paper,
+                solution=solution,
             )
         finally:
             session.lock.release()
+    finally:
+        _slots.release()
+
+
+@app.post("/api/ask-step", response_model=StepAskResponse)
+def ask_step(req: StepAskRequest) -> StepAskResponse:
+    """只针对主对话里的某一步作答。
+
+    侧栏使用独立的 STEP_SESSIONS：这里产生的问答不会追加到主会话，
+    因此主对话的轮次、历史上下文和页面上的消息列表都保持不变。
+    """
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="问题不能为空。")
+    if not config.OPENAI_API_KEY.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未配置 OPENAI_API_KEY，请在项目根目录 .env 中填写后重启。",
+        )
+
+    if not _slots.acquire(timeout=0.5):
+        raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
+
+    try:
+        parent = SESSIONS.get(req.parent_session_id)
+        if parent is None:
+            raise HTTPException(
+                status_code=404,
+                detail="原对话已过期，请回到主对话重新提问。",
+            )
+
+        if not parent.lock.acquire(timeout=0.5):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话正在处理上一条消息，请稍后再试。",
+            )
+
+        try:
+            turn_data = SESSIONS.get_turn_by_id(parent, req.parent_turn_id)
+            if turn_data is None:
+                turn_data = SESSIONS.get_turn(parent, req.parent_turn)
+            if turn_data is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="找不到这条回答，请回到主对话重新点击步骤。",
+                )
+
+            original_question = parent.original_question or str(
+                turn_data.get("question") or ""
+            )
+            turn_question = str(turn_data.get("question") or "")
+            parent_answer = str(turn_data.get("answer") or "")
+            try:
+                parent_turn_number = parent.turns.index(turn_data) + 1
+            except ValueError:
+                parent_turn_number = req.parent_turn or 1
+        finally:
+            parent.lock.release()
+
+        parent_display = strip_answer_marker(
+            normalize_math_delimiters(parent_answer)
+        )
+        found = find_solution_step(
+            parent_display,
+            req.step_index,
+            req.step_text,
+        )
+        if found is None:
+            raise HTTPException(
+                status_code=404,
+                detail="没有找到这一步，请回到主对话刷新后重试。",
+            )
+        step, _solution = found
+        step_label = str(step.get("label") or f"第{req.step_index}步")
+        step_question = build_step_question(question, parent_turn_number, step)
+
+        thread = STEP_SESSIONS.get_or_create(req.step_session_id)
+        if not thread.lock.acquire(timeout=0.5):
+            raise HTTPException(
+                status_code=409,
+                detail="这个步骤追问正在处理上一条消息，请稍后再试。",
+            )
+
+        try:
+            if not thread.turns:
+                STEP_SESSIONS.append_turn(
+                    thread,
+                    build_step_seed(
+                        original_question,
+                        turn_question,
+                        parent_answer,
+                    ),
+                    "好的，我已阅读原题和完整解答，会只回答被追问的部分。",
+                )
+
+            history = STEP_SESSIONS.history_for(thread)
+            turn = max(1, len(thread.turns))
+
+            trace_path = new_trace_file(TRACE_DIR, prefix="step")
+            tracer = TraceRecorder(
+                case_id=f"step-{thread.id[:8]}-t{turn}",
+                question=step_question,
+                path=trace_path,
+            )
+
+            start = time.perf_counter()
+            try:
+                # 侧栏只解释步骤，不需要再检索题库，避免无关结果干扰。
+                answer = Agent(client=get_client(), retrieval=False).run(
+                    step_question,
+                    trace=tracer,
+                    history=history,
+                )
+            except Exception as e:
+                answer = f"错误：求解失败（{type(e).__name__}: {e}）"
+                tracer.add("error", kind="agent_exception", message=answer)
+            elapsed = time.perf_counter() - start
+
+            tracer.finish(
+                request_elapsed=round(elapsed, 4),
+                session_id=thread.id,
+                turn=turn,
+                scope="step",
+                history_messages=len(history),
+                history_chars=sum(len(m["content"]) for m in history),
+            )
+
+            error = tracer.error
+            if error is None and answer.startswith("错误："):
+                error = answer
+
+            if error is None:
+                # 只写侧栏会话；主 SESSIONS 完全不动。
+                STEP_SESSIONS.append_turn(thread, step_question, answer)
+
+            return StepAskResponse(
+                answer=answer,
+                display_answer=strip_answer_marker(
+                    normalize_math_delimiters(answer)
+                ),
+                step_session_id=thread.id,
+                step_index=req.step_index,
+                step_label=step_label,
+                turn=turn,
+                error=error,
+                elapsed=round(elapsed, 2),
+                llm_calls=tracer.llm_calls,
+                tool_calls=tracer.tool_calls,
+                tool_errors=tracer.tool_errors,
+                tokens=tracer.usage["total_tokens"],
+                trace_file=trace_path.name,
+                steps=collect_steps(tracer.events),
+                tools=collect_tools(tracer.events),
+            )
+        finally:
+            thread.lock.release()
     finally:
         _slots.release()
 

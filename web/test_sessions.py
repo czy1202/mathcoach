@@ -26,6 +26,32 @@ def test_append_turn_builds_user_assistant_history():
     assert history[1]["content"] == "极限是 1"
 
 
+def test_turn_id_locates_turn_after_append():
+    """步骤追问靠 turn_id 定位原回答，不能只依赖会被裁剪的轮次序号。"""
+    store = SessionStore()
+    session = store.get_or_create()
+
+    first_id = store.append_turn(session, "q1", "a1")
+    second_id = store.append_turn(session, "q2", "a2")
+
+    assert first_id != second_id
+    assert store.get_turn_by_id(session, first_id)["answer"] == "a1"
+    assert store.get_turn_by_id(session, second_id)["answer"] == "a2"
+    assert store.get_turn(session, 2)["answer"] == "a2"
+    assert store.get_turn(session, 3) is None
+    assert store.get_turn_by_id(session, "missing") is None
+
+
+def test_get_returns_none_for_reset_or_invalid_id():
+    store = SessionStore()
+    session = store.get_or_create()
+
+    assert store.get(session.id) is session
+    assert store.get("not-a-valid-id") is None
+    store.reset(session.id)
+    assert store.get(session.id) is None
+
+
 def test_invalid_session_id_starts_new_session():
     store = SessionStore()
     session = store.get_or_create("not-a-valid-id")

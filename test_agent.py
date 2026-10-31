@@ -92,6 +92,12 @@ def test_without_history_system_prompt_is_unchanged():
     assert client.requests[0][0]["content"] == SYSTEM_PROMPT
 
 
+def test_system_prompt_requires_third_level_step_headings():
+    """完整解答必须用 ### 第一步 形式，前端才能切成可点击步骤。"""
+    assert "### 第一步" in SYSTEM_PROMPT
+    assert "追问" in SYSTEM_PROMPT
+
+
 def test_history_filters_invalid_messages():
     """历史里的 system / tool / 空内容不应进入模型上下文。"""
     client = RecordingClient()

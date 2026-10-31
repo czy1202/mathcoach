@@ -19,6 +19,15 @@
   const paperPlaceholder = document.getElementById("paper-placeholder");
   const paperContent = document.getElementById("paper-content");
   const composer = document.querySelector(".composer");
+  const stepPanel = document.getElementById("step-panel");
+  const stepBackdrop = document.getElementById("step-backdrop");
+  const stepClose = document.getElementById("step-close");
+  const stepTitle = document.getElementById("step-panel-title");
+  const stepQuote = document.getElementById("step-quote");
+  const stepThread = document.getElementById("step-thread");
+  const stepForm = document.getElementById("step-form");
+  const stepInput = document.getElementById("step-question");
+  const stepSend = document.getElementById("step-send");
 
   const DEFAULT_PLACEHOLDER = input.placeholder;
   let busy = false;
@@ -28,6 +37,12 @@
   let papersState = "idle"; // idle | loading | ready | error
   let editions = [];
   let paperRequestId = 0;
+
+  // 每个“步骤”有自己的迷你对话：
+  // key = 主会话 + 轮次 + 步骤序号，value 里保存侧栏消息和独立 session id。
+  const stepThreads = new Map();
+  let activeStepKey = null;
+  let lastStepButton = null;
 
   // ---------- Markdown / 公式渲染 ----------
   //
@@ -359,6 +374,83 @@
     return box;
   }
 
+  function stepKeyFor(data, stepIndex) {
+    const parent = data.session_id || "no-session";
+    const turn = data.turn_id || data.turn || "1";
+    return `${parent}:${turn}:${stepIndex}`;
+  }
+
+  function createSolution(data) {
+    const solution = data.solution;
+    const box = document.createElement("div");
+    box.className = "solution";
+
+    if (solution.intro) {
+      const intro = document.createElement("div");
+      intro.className = "solution-intro";
+      intro.innerHTML = renderMarkdown(solution.intro);
+      box.appendChild(intro);
+    }
+
+    const note = document.createElement("div");
+    note.className = "solution-note";
+    note.textContent = "点击任意步骤右侧的「问这一步」，会在侧栏单独追问，不打断主对话。";
+    box.appendChild(note);
+
+    const list = document.createElement("div");
+    list.className = "solution-steps";
+
+    solution.steps.forEach((step) => {
+      const card = document.createElement("article");
+      card.className = "solution-step";
+
+      const head = document.createElement("div");
+      head.className = "solution-step-head";
+
+      const label = document.createElement("span");
+      label.className = "solution-step-label";
+      label.textContent = step.label || `第${step.index}步`;
+      head.appendChild(label);
+
+      if (step.title) {
+        const title = document.createElement("div");
+        title.className = "solution-step-title";
+        title.textContent = step.title;
+        head.appendChild(title);
+      }
+
+      const ask = document.createElement("button");
+      ask.type = "button";
+      ask.className = "step-ask";
+      ask.textContent = "问这一步";
+      ask.setAttribute("aria-label", `针对${step.label || `第${step.index}步`}提问`);
+      ask.addEventListener("click", () => {
+        lastStepButton = ask;
+        openStepPanel(data, step);
+      });
+      head.appendChild(ask);
+      card.appendChild(head);
+
+      const body = document.createElement("div");
+      body.className = "solution-step-body";
+      body.innerHTML = renderMarkdown(step.markdown || "");
+      card.appendChild(body);
+
+      list.appendChild(card);
+    });
+
+    box.appendChild(list);
+
+    if (solution.outro) {
+      const outro = document.createElement("div");
+      outro.className = "solution-outro";
+      outro.innerHTML = renderMarkdown(solution.outro);
+      box.appendChild(outro);
+    }
+
+    return box;
+  }
+
   function createAssistantMessage(data) {
     const article = document.createElement("article");
     article.className = "message assistant";
@@ -380,7 +472,17 @@
       </div>`;
 
     const content = article.querySelector(".content");
-    content.innerHTML = renderMarkdown(data.display_answer || data.answer || "(空回答)");
+    if (
+      data.solution
+      && Array.isArray(data.solution.steps)
+      && data.solution.steps.length
+    ) {
+      content.appendChild(createSolution(data));
+    } else {
+      content.innerHTML = renderMarkdown(
+        data.display_answer || data.answer || "(空回答)",
+      );
+    }
 
     if (data.final_answer) {
       const card = article.querySelector(".answer-card");
@@ -441,12 +543,208 @@
     return article;
   }
 
+  // ---------- 步骤追问侧栏 ----------
+
+  function stepStateFor(data, step) {
+    const key = stepKeyFor(data, step.index);
+    let state = stepThreads.get(key);
+    if (!state) {
+      state = {
+        key,
+        parentSessionId: data.session_id || "",
+        parentTurnId: data.turn_id || null,
+        parentTurn: data.turn || null,
+        stepIndex: step.index,
+        stepLabel: step.label || `第${step.index}步`,
+        stepTitle: step.title || "",
+        stepMarkdown: step.markdown || "",
+        threadSessionId: null,
+        messages: [],
+        busy: false,
+      };
+      stepThreads.set(key, state);
+    }
+    return state;
+  }
+
+  function renderStepQuote(state) {
+    stepQuote.replaceChildren();
+    if (!state.stepMarkdown) {
+      stepQuote.classList.add("is-empty");
+      return;
+    }
+    stepQuote.classList.remove("is-empty");
+
+    const label = document.createElement("div");
+    label.className = "step-quote-label";
+    label.textContent = "引用步骤";
+    stepQuote.appendChild(label);
+
+    const title = document.createElement("div");
+    title.className = "step-quote-title";
+    title.textContent = state.stepTitle
+      ? `${state.stepLabel} · ${state.stepTitle}`
+      : state.stepLabel;
+    stepQuote.appendChild(title);
+
+    const body = document.createElement("div");
+    body.className = "step-quote-body";
+    body.innerHTML = renderMarkdown(state.stepMarkdown);
+    stepQuote.appendChild(body);
+  }
+
+  function renderStepMessages(state) {
+    stepThread.replaceChildren();
+
+    if (!state.messages.length && !state.busy) {
+      const empty = document.createElement("div");
+      empty.className = "step-empty";
+
+      const mark = document.createElement("div");
+      mark.className = "step-empty-mark";
+      mark.textContent = "?";
+      empty.appendChild(mark);
+
+      const text = document.createElement("div");
+      text.textContent = "这里只会讨论当前这一步，不会占用主对话。可以问“为什么想到这一步”“这个等号怎么来的”等。";
+      empty.appendChild(text);
+      stepThread.appendChild(empty);
+      return;
+    }
+
+    state.messages.forEach((message) => {
+      const item = document.createElement("div");
+      if (message.role === "user") {
+        item.className = "step-msg user";
+        item.textContent = message.text;
+      } else {
+        item.className = "step-msg assistant";
+        if (message.error) item.classList.add("error");
+        if (message.error) {
+          item.textContent = message.text;
+        } else {
+          const content = document.createElement("div");
+          content.className = "content";
+          content.innerHTML = renderMarkdown(message.text);
+          item.appendChild(content);
+        }
+      }
+      stepThread.appendChild(item);
+    });
+
+    if (state.busy) {
+      const pending = document.createElement("div");
+      pending.className = "step-pending";
+      pending.innerHTML = '<span class="spinner"></span><span>正在解释这一步…</span>';
+      stepThread.appendChild(pending);
+    }
+
+    requestAnimationFrame(() => {
+      stepThread.scrollTop = stepThread.scrollHeight;
+    });
+  }
+
+  function renderStepPanel(state) {
+    stepTitle.textContent = state.stepTitle
+      ? `${state.stepLabel} · ${state.stepTitle}`
+      : state.stepLabel;
+    renderStepQuote(state);
+    renderStepMessages(state);
+    stepInput.disabled = state.busy;
+    stepSend.disabled = state.busy;
+    stepInput.placeholder = state.busy
+      ? "正在回答…"
+      : `针对${state.stepLabel}提问，例如：这里为什么成立？`;
+  }
+
+  function openStepPanel(data, step) {
+    const state = stepStateFor(data, step);
+    activeStepKey = state.key;
+    renderStepPanel(state);
+
+    stepBackdrop.hidden = false;
+    stepPanel.hidden = false;
+    document.body.classList.add("step-panel-open");
+    requestAnimationFrame(() => stepInput.focus());
+  }
+
+  function closeStepPanel(restoreFocus = true) {
+    if (!stepPanel || stepPanel.hidden) return;
+
+    stepPanel.hidden = true;
+    stepBackdrop.hidden = true;
+    document.body.classList.remove("step-panel-open");
+    activeStepKey = null;
+
+    if (restoreFocus && lastStepButton && lastStepButton.isConnected) {
+      lastStepButton.focus();
+    }
+    lastStepButton = null;
+  }
+
+  function resizeStepInput() {
+    stepInput.style.height = "auto";
+    stepInput.style.height = `${Math.min(stepInput.scrollHeight, 120)}px`;
+  }
+
+  async function submitStepQuestion() {
+    const state = activeStepKey ? stepThreads.get(activeStepKey) : null;
+    const question = stepInput.value.trim();
+    if (!state || !question || state.busy) return;
+
+    state.busy = true;
+    state.messages.push({ role: "user", text: question });
+    stepInput.value = "";
+    resizeStepInput();
+    renderStepPanel(state);
+
+    try {
+      const response = await fetch("/api/ask-step", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question,
+          parent_session_id: state.parentSessionId,
+          parent_turn_id: state.parentTurnId,
+          parent_turn: state.parentTurn,
+          step_index: state.stepIndex,
+          step_text: state.stepMarkdown,
+          step_session_id: state.threadSessionId,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(errorText(data.detail, response.status));
+      }
+
+      state.threadSessionId = data.step_session_id || state.threadSessionId;
+      state.messages.push({
+        role: "assistant",
+        text: data.display_answer || data.answer || "(空回答)",
+        error: Boolean(data.error),
+      });
+    } catch (err) {
+      state.messages.push({
+        role: "assistant",
+        text: err.message || "网络请求失败。",
+        error: true,
+      });
+    } finally {
+      state.busy = false;
+      if (activeStepKey === state.key) {
+        renderStepPanel(state);
+        if (!stepPanel.hidden) stepInput.focus();
+      }
+    }
+  }
+
   // ---------- 真题浏览 ----------
 
   function setMode(next) {
     if (next !== "solve" && next !== "papers") return;
     if (next === mode) return;
 
+    closeStepPanel(false);
     mode = next;
     if (modeGate) modeGate.hidden = true;
     modeCards.forEach((card) => {
@@ -468,6 +766,7 @@
   function showGate() {
     if (busy || mode === null) return;
 
+    closeStepPanel(false);
     mode = null;
     chat.hidden = true;
     if (composer) composer.hidden = true;
@@ -781,6 +1080,10 @@
     // 新对话始终回到“问题目”，避免在真题页清空聊天后看不见结果
     setMode("solve");
 
+    closeStepPanel(false);
+    stepThreads.clear();
+    lastStepButton = null;
+
     const oldSession = sessionId;
     sessionId = null;
     chat.querySelectorAll(".message").forEach((node) => node.remove());
@@ -850,6 +1153,37 @@
   form.addEventListener("submit", (event) => {
     event.preventDefault();
     submitQuestion();
+  });
+
+  if (stepForm) {
+    stepForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitStepQuestion();
+    });
+  }
+
+  if (stepInput) {
+    stepInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+        event.preventDefault();
+        submitStepQuestion();
+      }
+    });
+    stepInput.addEventListener("input", resizeStepInput);
+  }
+
+  if (stepClose) {
+    stepClose.addEventListener("click", () => closeStepPanel());
+  }
+
+  if (stepBackdrop) {
+    stepBackdrop.addEventListener("click", () => closeStepPanel());
+  }
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && stepPanel && !stepPanel.hidden) {
+      closeStepPanel();
+    }
   });
 
   newChatBtn.addEventListener("click", startNewChat);

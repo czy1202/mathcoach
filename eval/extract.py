@@ -29,13 +29,19 @@ _MARKER_RE = re.compile(
 # 选择题答案：B / 选项B / 选B / 选 B
 _CHOICE_RE = re.compile(r"^(?:选项|选择|选)?\s*([A-Da-d])\s*[.。]?$")
 
-# 单个变量/函数名做左值的等式，例如 x = 1/2、a_n = ...、f(x) = ...、y' = ...
+# 单个变量/函数名做左值的等式，例如 x = 1/2、a_n = ...、f(x) = ...、y' = ...、
+# f^{(n)}(1) = ne（归一化后是 f**((n))(1) = ne）
 _EQ_RE = re.compile(
-    r"^\s*[A-Za-z][A-Za-z0-9_'′]*(?:\s*\([^()]*\))?\s*=\s*(?P<rhs>.+)$"
+    r"^\s*[A-Za-z][A-Za-z0-9_'′*^]*(?:\s*\([^=]*\))*\s*=\s*(?P<rhs>.+)$"
 )
 
 # 结尾的解释性从句，例如 “1/2，故选 B”
 _TRAILING_CLAUSE_RE = re.compile(r"[，,]\s*(?:故|所以|因此|即|选|答案).*$")
+
+# 答案末尾的附加条件，例如 ne（n≥1）、x=1/2（n∈N）
+_CONDITION_RE = re.compile(
+    r"[（(][^()（）]*(?:[<>=≤≥]|∈|其中)[^()（）]*[)）]\s*$"
+)
 
 # 判断某一行是否“像答案”，只用于无标记时的兜底，避免把客套话当答案
 _ANSWER_HINT_RE = re.compile(r"[0-9A-Za-z=+\-*/^()\[\]{}<>√π]|得证|证毕|无解|不存在")
@@ -69,6 +75,8 @@ def _clean(raw: str) -> str:
     s = _TRAILING_CLAUSE_RE.sub("", s).strip()
     s = _strip_wrappers(s)
     s = _normalize_latex(s)
+    s = s.replace("$", "")               # 公式定界符可能只包住答案的一部分
+    s = _CONDITION_RE.sub("", s).strip()  # 去掉 (n≥1) 这类附加条件
     s = re.sub(r"\s+", " ", s).strip()   # LaTeX 函数替换可能留下连续空格
     s = _strip_wrappers(s)
 

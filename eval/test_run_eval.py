@@ -16,6 +16,7 @@ from eval.run_eval import (
     main,
     parse_args,
     run_all,
+    run_case,
     self_check,
     summarize,
 )
@@ -128,8 +129,85 @@ def test_self_check_detects_bad_answer():
 
 
 def test_load_cases_count():
-    """评测集应至少有 20 道题。"""
-    assert len(load_cases()) >= 20
+    """评测集固定为 2024、2025 两年 CMC 真题，共 34 题。"""
+    cases = load_cases()
+
+    assert len(cases) == 34
+    assert sum(1 for c in cases if c["year"] == 2024) == 17
+    assert sum(1 for c in cases if c["year"] == 2025) == 17
+    assert {c["kind"] for c in cases} == {"填空", "选择", "解答"}
+
+
+def test_load_cases_have_unique_ids():
+    ids = [c["id"] for c in load_cases()]
+    assert len(ids) == len(set(ids))
+
+
+def test_real_cases_have_provenance():
+    """每道题都要能追溯到 2024/2025 的试卷版和答案版。"""
+    for case in load_cases():
+        assert case["source"].startswith(f"{case['year']}")
+        assert case["year"] in (2024, 2025)
+        assert case["kind"] in {"填空", "选择", "解答"}
+
+
+# ---------- 多小问 / 证明题真值 ------------------
+
+PARTS_CASE = {
+    "id": "P-01", "topic": "极限", "kind": "解答", "year": 2024,
+    "statement": "parts", "answer": "f(0)=-3，f'(0)=0，f''(0)=9",
+    "parts": [
+        {"labels": ["f(0)"], "answer": "-3", "judge": "symbolic"},
+        {"labels": ["f'(0)"], "answer": "0", "judge": "symbolic"},
+        {"labels": ["f''(0)"], "answer": "9", "judge": "symbolic"},
+    ],
+    "judge": "parts", "expect": "solve",
+}
+
+RUBRIC_CASE = {
+    "id": "R-01", "topic": "导数", "kind": "解答", "year": 2025,
+    "statement": "rubric", "answer": "令 G(x)=e^(-x)F(x)，G(x) 单调递减，故 F(x)≥0。",
+    "rubric": [
+        {"any": ["e\\*\\*\\(-x\\)"]},
+        {"any": ["单调递减"]},
+        {"any": ["F\\(x\\)(≥|>=)0"]},
+    ],
+    "judge": "rubric", "expect": "solve",
+}
+
+
+def test_parts_case_passes_when_all_subanswers_present():
+    agent = FakeAgent({
+        "parts": r"最终答案：$f(0)=-3,\ f'(0)=0,\ f''(0)=9$",
+    })
+    result = run_case(agent, PARTS_CASE)
+
+    assert result.verdict is Verdict.PASS
+
+
+def test_parts_case_fails_on_wrong_subanswer():
+    agent = FakeAgent({
+        "parts": "最终答案：f(0)=-3，f'(0)=1，f''(0)=9",
+    })
+    assert run_case(agent, PARTS_CASE).verdict is Verdict.FAIL
+
+
+def test_rubric_case_uses_full_answer_not_final_line():
+    agent = FakeAgent({
+        "rubric": (
+            "证明：令 $G(x)=e^{-x}F(x)$，可推出 $G(x)$ 单调递减，"
+            "所以 $F(x)\\ge 0$。\n最终答案：得证"
+        ),
+    })
+    assert run_case(agent, RUBRIC_CASE).verdict is Verdict.PASS
+
+
+def test_self_check_detects_incomplete_parts_or_rubric():
+    bad_parts = dict(PARTS_CASE, answer="f(0)=-3，f'(0)=0")
+    bad_rubric = dict(RUBRIC_CASE, answer="令 G(x)=e^(-x)F(x)。")
+
+    assert self_check([bad_parts]) == ["P-01"]
+    assert self_check([bad_rubric]) == ["R-01"]
 
 
 # ---------- 命令行开关 ----------

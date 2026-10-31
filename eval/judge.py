@@ -1,11 +1,14 @@
 """自动判分器。
 
 职责：比较"模型给出的答案"和"标准答案"，返回 Verdict。
-支持三种判定方式：
+支持六种判定方式：
 
     symbolic  符号等价：用 sympy 化简两边之差，结果为 0 算通过
     numeric   数值容差：把随机取样的数值代入两边，在容差内一致算通过
     exact     精确匹配：字符串完全相同算通过
+    point     坐标点：两个分量分别符号等价才算通过
+    parts     多小问：每个小问分别抽取、分别判分
+    rubric    证明题：按关键步骤清单匹配（启发式）
 
 统一入口是 judge_answer(expect, actual, method) -> Verdict。
 所有解析失败、未知判定方式都返回 UNCERTAIN（或 FAIL），绝不抛异常。
@@ -20,10 +23,11 @@
 
 import math
 import random
+import re
 
 import sympy as sp
 
-from mathparse import parse_math
+from mathparse import normalize_math_text, parse_math
 from schemas import Verdict
 
 
@@ -116,12 +120,71 @@ def _judge_exact(expect: str, actual: str) -> Verdict:
     return Verdict.PASS if str(expect).strip() == str(actual).strip() else Verdict.FAIL
 
 
+def _split_top_level(text: str) -> list[str]:
+    """按顶层逗号切分，不切开 sqrt(...)、f(...) 里面的逗号。"""
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "([{（":
+            depth += 1
+        elif ch in ")]}）":
+            depth -= 1
+        elif ch in ",，" and depth == 0:
+            parts.append(text[start:i])
+            start = i + 1
+    parts.append(text[start:])
+    return parts
+
+
+def _parse_point(text: str) -> tuple[sp.Expr, sp.Expr] | None:
+    """把 "(1/√2, 1/2)" 或 "x=1/√2, y=1/2" 解析成两个坐标。"""
+    s = normalize_math_text(text).strip().strip("$")
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+
+    parts = _split_top_level(s)
+    if len(parts) != 2:
+        return None
+
+    values: list[sp.Expr] = []
+    for part in parts:
+        part = part.strip()
+        if "=" in part:
+            part = part.split("=", 1)[1].strip()
+        values.append(parse_math(part))
+
+    return values[0], values[1]
+
+
+def _judge_point(expect: str, actual: str) -> Verdict:
+    """坐标点判定：两个分量分别符号等价才通过。"""
+    try:
+        expected = _parse_point(expect)
+        got = _parse_point(actual)
+    except Exception:
+        return Verdict.UNCERTAIN
+
+    if expected is None or got is None:
+        return Verdict.UNCERTAIN
+
+    try:
+        return (
+            Verdict.PASS
+            if all(sp.simplify(a - b) == 0 for a, b in zip(expected, got))
+            else Verdict.FAIL
+        )
+    except Exception:
+        return Verdict.UNCERTAIN
+
+
 # ---------- 统一入口 ----------
 
 _JUDGES = {
     "symbolic": _judge_symbolic,
     "numeric": _judge_numeric,
     "exact": _judge_exact,
+    "point": _judge_point,
 }
 
 
@@ -132,7 +195,8 @@ def judge_answer(expect: str | None, actual: str | None, method: str = "symbolic
         expect: 标准答案。为 None 表示这道题没有可判定的标准答案
                 （例如拒答类、人工判定类），返回 UNCERTAIN。
         actual: 模型给出的答案。
-        method: 判定方式，取值 "symbolic" / "numeric" / "exact"。
+        method: 判定方式，取值 "symbolic" / "numeric" / "exact" / "point"。
+                parts 与 rubric 由 judge_parts / judge_rubric 单独调用。
 
     Returns:
         Verdict: PASS 通过、FAIL 不通过、UNCERTAIN 无法判定。
@@ -152,6 +216,99 @@ def judge_answer(expect: str | None, actual: str | None, method: str = "symbolic
     except Exception:
         # 最后一道保险：任何意外都不让判分器中断整批评测
         return Verdict.UNCERTAIN
+
+
+# ---------- 多小问与证明题判定 ----------
+
+def _label_pattern(label: str) -> str:
+    """把标签转成可在压缩空白后的答案文本里匹配的正则。"""
+    normalized = re.sub(r"\s+", "", normalize_math_text(label))
+    pattern = re.escape(normalized)
+    if re.fullmatch(r"[A-Za-z]", normalized):
+        # 单字母标签（如 a）不能匹配到单词内部
+        pattern = rf"(?<![A-Za-z]){pattern}(?![A-Za-z])"
+    return pattern
+
+
+def extract_labeled_value(text: str, labels: list[str]) -> str | None:
+    """从答案文本里找出 "标签 = 值" / "标签为 值" 中的值。
+
+    只做机械抽取，找不到返回 None，由调用方判为 UNCERTAIN。
+    """
+    if not text:
+        return None
+
+    # 去掉空白，避免模型写成 f(0) = -3 / f (0) = -3 时漏匹配
+    normalized = re.sub(r"\s+", "", normalize_math_text(text))
+
+    for label in labels:
+        if not label:
+            continue
+        match = re.search(
+            _label_pattern(label) + r"(?:=|:|：|为)([^,，;；、\n]+)",
+            normalized,
+        )
+        if match:
+            value = match.group(1).strip().strip("。.$")
+            if value:
+                return value
+
+    return None
+
+
+def judge_parts(parts: list[dict], actual: str | None) -> Verdict:
+    """多小问判定：每个小问分别抽取并判分，全部通过才算通过。
+
+    Args:
+        parts: 每项形如 {"labels": ["f(0)"], "answer": "-3", "judge": "symbolic"}
+        actual: 模型回答中的最终答案文本
+    """
+    if not actual:
+        return Verdict.FAIL
+
+    verdicts: list[Verdict] = []
+    for part in parts:
+        labels = part.get("labels") or ([part["label"]] if part.get("label") else [])
+        value = extract_labeled_value(actual, labels)
+        if value is None:
+            verdicts.append(Verdict.UNCERTAIN)
+            continue
+        verdicts.append(
+            judge_answer(part.get("answer"), value, part.get("judge", "symbolic"))
+        )
+
+    if not verdicts:
+        return Verdict.UNCERTAIN
+    if any(v is Verdict.FAIL for v in verdicts):
+        return Verdict.FAIL
+    if all(v is Verdict.PASS for v in verdicts):
+        return Verdict.PASS
+    return Verdict.UNCERTAIN
+
+
+def judge_rubric(checks: list[dict], actual: str | None) -> Verdict:
+    """证明题关键步骤清单判定。
+
+    这是启发式判定：每项 check 只要有一个正则命中就算该步骤出现，
+    全部 check 命中才算 PASS。它能检查"关键结论有没有写出来"，
+    但不能替代人工阅卷判断证明是否严谨。
+    """
+    if not actual or not str(actual).strip():
+        return Verdict.FAIL
+    if not checks:
+        return Verdict.UNCERTAIN
+
+    # 保留大小写：F/G 是辅助函数，f 是原函数，不能混为一谈
+    normalized = re.sub(r"\s+", "", normalize_math_text(actual))
+
+    for check in checks:
+        patterns = check.get("any", []) if isinstance(check, dict) else [check]
+        if not patterns:
+            return Verdict.UNCERTAIN
+        if not any(re.search(p, normalized) for p in patterns):
+            return Verdict.FAIL
+
+    return Verdict.PASS
 
 
 # ---------- 演示 ----------

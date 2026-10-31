@@ -5,9 +5,14 @@
     python -m eval.run_eval --real    # OpenAIClient，读取 .env 调用真实模型
 
 判定规则：
-    expect="solve"   调 judge_answer 比较模型答案与标准答案
+    expect="solve"   调 judge_answer 比较模型答案与标准答案；
+                     带 parts 的多小问逐项判分；judge="rubric" 的证明题
+                     按官方解答的关键步骤清单判定
     expect="refuse"  检查回答里是否出现"不确定 / 信息不足"等拒答标志，
                      出现算正确拒答，否则算未拒答
+
+评测集固定为 2024、2025 两年 CMC 真题（答案以两份答案版 PDF 为准）：
+    每年 6 道填空 + 6 道选择 + 5 道解答，共 34 题。
 
 注意：--stub 分数只用于验证评测流程是否通畅，不代表真实模型水平；
 --real 才会真正调用模型，这份报告才有评估意义。
@@ -22,7 +27,7 @@ from pathlib import Path
 import config
 from agent import Agent
 from eval.extract import extract_final_answer
-from eval.judge import judge_answer
+from eval.judge import judge_answer, judge_parts, judge_rubric
 from llm import OpenAIClient, StubClient
 from schemas import Verdict
 from tracing import TraceRecorder, new_trace_file
@@ -53,7 +58,9 @@ class CaseResult:
     expect: str             # solve 或 refuse
     verdict: Verdict        # 通过 / 失败 / 不确定
     answer: str             # 模型给出的完整回答（用于摘要展示）
-    elapsed: float = 0.0    # 该题耗时（秒）
+    year: int | None = None       # 2024 / 2025
+    kind: str = ""                # 填空 / 选择 / 解答
+    elapsed: float = 0.0          # 该题耗时（秒）
     extracted: str | None = None  # 从回答里提取出的最终答案
 
 
@@ -120,7 +127,14 @@ def self_check(cases: list[dict]) -> list[str]:
     for case in cases:
         if case["expect"] != "solve":
             continue
-        result = judge_answer(case["answer"], case["answer"], case["judge"])
+
+        if case.get("parts"):
+            result = judge_parts(case["parts"], case["answer"])
+        elif case.get("judge") == "rubric":
+            result = judge_rubric(case["rubric"], case["answer"])
+        else:
+            result = judge_answer(case["answer"], case["answer"], case["judge"])
+
         if result is not Verdict.PASS:
             bad.append(case["id"])
     return bad
@@ -165,7 +179,14 @@ def run_case(
         # 提取失败时退回完整回答，让判分器给出 FAIL / UNCERTAIN，
         # 而不是悄悄当成通过。
         answer_for_judge = extracted if extracted is not None else actual
-        verdict = judge_answer(case["answer"], answer_for_judge, case["judge"])
+
+        if case.get("parts"):
+            verdict = judge_parts(case["parts"], answer_for_judge)
+        elif case.get("judge") == "rubric":
+            # 证明题的关键步骤分散在正文里，不能只看最终答案行
+            verdict = judge_rubric(case["rubric"], actual)
+        else:
+            verdict = judge_answer(case["answer"], answer_for_judge, case["judge"])
     elif case["expect"] == "refuse":
         verdict = Verdict.PASS if is_refusal(actual) else Verdict.FAIL
     else:
@@ -184,6 +205,8 @@ def run_case(
         expect=case["expect"],
         verdict=verdict,
         answer=actual or "",
+        year=case.get("year"),
+        kind=case.get("kind", ""),
         elapsed=elapsed,
         extracted=extracted,
     )
@@ -256,7 +279,7 @@ def print_report(results: list[CaseResult], client_name: str) -> None:
         extracted = "-"
         if r.expect == "solve":
             extracted = _summary(r.extracted, limit=24) if r.extracted else "未提取到"
-        print(f"{r.id:5s} | {r.topic:6s} | {r.expect:6s} | {_status(r):6s} | "
+        print(f"{r.id:10s} | {r.topic:6s} | {r.kind:4s} | {_status(r):6s} | "
               f"提取={extracted:24s} | {_summary(r.answer)}")
 
     total_elapsed = sum(r.elapsed for r in results)
@@ -267,9 +290,17 @@ def print_report(results: list[CaseResult], client_name: str) -> None:
     print(f"solve：{summary.solve_pass}/{summary.solve_total} 通过"
           f"（{_rate(summary.solve_pass, summary.solve_total)}），"
           f"失败 {summary.solve_fail}，不确定 {summary.solve_uncertain}")
-    print(f"refuse：{summary.refuse_pass}/{summary.refuse_total} 正确拒答"
-          f"（{_rate(summary.refuse_pass, summary.refuse_total)}），"
-          f"未拒答 {summary.refuse_fail}")
+    if summary.refuse_total:
+        print(f"refuse：{summary.refuse_pass}/{summary.refuse_total} 正确拒答"
+              f"（{_rate(summary.refuse_pass, summary.refuse_total)}），"
+              f"未拒答 {summary.refuse_fail}")
+
+    for year in sorted({r.year for r in results if r.year is not None}):
+        group = [r for r in results if r.year == year]
+        passed = sum(1 for r in group if r.verdict is Verdict.PASS)
+        print(f"{year} 年：{passed}/{len(group)} 通过"
+              f"（{_rate(passed, len(group))}）")
+
     print(f"总通过率：{summary.overall_pass}/{summary.total}"
           f"（{_rate(summary.overall_pass, summary.total)}）")
     if results:

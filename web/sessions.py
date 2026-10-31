@@ -116,6 +116,19 @@ class SessionStore:
             self._evict_if_needed()
             return session
 
+    def get(self, session_id: str | None) -> Session | None:
+        """按 id 取会话；不存在、已过期或 id 非法时返回 None。
+
+        和 ``get_or_create`` 不同，这里不会新建会话。步骤追问必须挂在一个
+        仍然存在的主对话上，否则就没有原题和解答可以引用。
+        """
+        if not session_id or not SESSION_ID_RE.fullmatch(session_id):
+            return None
+        now = time.monotonic()
+        with self._lock:
+            self._cleanup(now)
+            return self._sessions.get(session_id)
+
     def reset(self, session_id: str) -> bool:
         """删除一个会话；返回是否真的删除了。"""
         with self._lock:
@@ -145,15 +158,51 @@ class SessionStore:
 
     # ---------- 上下文 ----------
 
-    def append_turn(self, session: Session, question: str, answer: str) -> None:
-        """追加一轮最终问答。调用方需持有 session.lock。"""
+    def append_turn(self, session: Session, question: str, answer: str) -> str:
+        """追加一轮最终问答，返回稳定的 turn_id。
+
+        调用方需持有 session.lock。turn_id 不随轮次裁剪变化，步骤追问
+        用它定位原回答；``turn`` 序号只作为旧客户端/旧数据的兜底。
+        """
         if not session.original_question:
             session.original_question = question
-        session.turns.append({"question": question, "answer": answer})
+        turn_id = uuid.uuid4().hex
+        session.turns.append({
+            "id": turn_id,
+            "question": question,
+            "answer": answer,
+        })
         if len(session.turns) > self.max_turns:
             # 原始问题单独保存在 original_question，裁掉旧轮次后仍能置顶
             session.turns = session.turns[-self.max_turns:]
         session.updated_at = time.monotonic()
+        return turn_id
+
+    def get_turn_by_id(
+        self,
+        session: Session,
+        turn_id: str | None,
+    ) -> dict | None:
+        """按 turn_id 取一轮问答。调用方需持有 session.lock。"""
+        if not turn_id:
+            return None
+        for turn in session.turns:
+            if turn.get("id") == turn_id:
+                return turn
+        return None
+
+    def get_turn(
+        self,
+        session: Session,
+        turn: int | None,
+    ) -> dict | None:
+        """按 1 起的轮次序号取问答。调用方需持有 session.lock。
+
+        轮次被裁剪后旧序号会失效，因此这只是 turn_id 缺失时的兼容路径。
+        """
+        if turn is None or turn < 1 or turn > len(session.turns):
+            return None
+        return session.turns[turn - 1]
 
     def history_for(self, session: Session) -> list[dict[str, str]]:
         """构造送给模型的历史消息。
