@@ -28,6 +28,7 @@ import config
 from agent import Agent
 from eval.extract import extract_final_answer
 from eval.judge import judge_answer, judge_parts, judge_rubric
+from eval.verify import Verifier, resolve_failure
 from llm import OpenAIClient, StubClient
 from schemas import Verdict
 from tracing import TraceRecorder, new_trace_file
@@ -62,6 +63,10 @@ class CaseResult:
     kind: str = ""                # 填空 / 选择 / 解答
     elapsed: float = 0.0          # 该题耗时（秒）
     extracted: str | None = None  # 从回答里提取出的最终答案
+    first_verdict: Verdict | None = None  # 启用复核时，首轮判定结果
+    review_note: str = ""                 # 复核/重解的说明
+    second_answer: str | None = None      # 复核反馈后重解得到的回答
+    manual_review: bool = False           # 复核放行的证明题，需人工确认
 
 
 @dataclass
@@ -144,6 +149,7 @@ def run_case(
     agent,
     case: dict,
     trace_path: Path | None = None,
+    verifier: Verifier | None = None,
 ) -> CaseResult:
     """跑一道题并判定。
 
@@ -151,6 +157,8 @@ def run_case(
         agent: 提供 run(statement, trace=None) 的求解器
         case: 一条评测用例
         trace_path: 轨迹文件路径；为 None 时不记录
+        verifier: 可选的独立复核器。只对首轮未通过的 solve 题启用，
+                  会额外消耗一次复核调用，必要时再多一次重解。
 
     Returns:
         CaseResult: 单题结果。单题异常不会中断整批评测。
@@ -175,7 +183,10 @@ def run_case(
 
     extracted = None
     if case["expect"] == "solve":
-        extracted = extract_final_answer(actual)
+        # 多小问必须保留 "f(0)=-3" 里的标签，否则判分器不知道每个值对应哪一问。
+        extracted = extract_final_answer(
+            actual, strip_assignment=not case.get("parts")
+        )
         # 提取失败时退回完整回答，让判分器给出 FAIL / UNCERTAIN，
         # 而不是悄悄当成通过。
         answer_for_judge = extracted if extracted is not None else actual
@@ -191,6 +202,43 @@ def run_case(
         verdict = Verdict.PASS if is_refusal(actual) else Verdict.FAIL
     else:
         raise ValueError(f"{case['id']} 的 expect 字段非法：{case['expect']!r}")
+
+    first_verdict = None
+    review_note = ""
+    second_answer = None
+    manual_review = False
+    if (
+        verifier is not None
+        and case["expect"] == "solve"
+        and verdict is not Verdict.PASS
+    ):
+        first_verdict = verdict
+        review_raw = ""
+        try:
+            outcome = resolve_failure(verifier, agent, case, actual, verdict)
+        except Exception as e:  # 复核失败不应让整批评测中断
+            outcome = None
+            review_note = f"复核异常（{type(e).__name__}: {e}），维持首轮判定"
+        if outcome is None:
+            verdict = first_verdict
+        else:
+            verdict = outcome.verdict
+            review_note = outcome.note
+            second_answer = outcome.second_answer
+            manual_review = outcome.manual_review
+            review_raw = outcome.review.raw if outcome.review else ""
+        elapsed = time.perf_counter() - start
+        if tracer is not None:
+            tracer.add(
+                "review",
+                first_verdict=first_verdict.value,
+                final_verdict=verdict.value,
+                note=review_note,
+                review_raw=review_raw,
+                second_answer=second_answer,
+                manual_review=manual_review,
+                elapsed=round(elapsed, 4),
+            )
 
     if tracer is not None:
         tracer.finish(
@@ -209,6 +257,10 @@ def run_case(
         kind=case.get("kind", ""),
         elapsed=elapsed,
         extracted=extracted,
+        first_verdict=first_verdict,
+        review_note=review_note,
+        second_answer=second_answer,
+        manual_review=manual_review,
     )
 
 
@@ -216,9 +268,10 @@ def run_all(
     agent,
     cases: list[dict],
     trace_path: Path | None = None,
+    verifier: Verifier | None = None,
 ) -> list[CaseResult]:
     """逐题跑完整批评测。"""
-    return [run_case(agent, case, trace_path) for case in cases]
+    return [run_case(agent, case, trace_path, verifier) for case in cases]
 
 
 def summarize(results: list[CaseResult]) -> EvalSummary:
@@ -258,6 +311,10 @@ def _status(result: CaseResult) -> str:
     """把人看的判定结果显示成中文。"""
     if result.expect == "refuse":
         return "正确拒答" if result.verdict is Verdict.PASS else "未拒答"
+    if result.manual_review and result.verdict is Verdict.PASS:
+        return "复核放行"
+    if result.first_verdict is not None and result.verdict is Verdict.PASS:
+        return "复核通过"
     return {
         Verdict.PASS: "通过",
         Verdict.FAIL: "失败",
@@ -265,12 +322,18 @@ def _status(result: CaseResult) -> str:
     }[result.verdict]
 
 
-def print_report(results: list[CaseResult], client_name: str) -> None:
+def print_report(
+    results: list[CaseResult],
+    client_name: str,
+    verified: bool = False,
+) -> None:
     """打印逐题结果与汇总指标。"""
     summary = summarize(results)
 
     print("=" * 72)
     print(f"mathcoach 评测报告（模型客户端：{client_name}）")
+    if verified:
+        print("已启用独立复核：首轮未通过的题会复核一次，必要时反馈重解一次。")
     if client_name == "StubClient":
         print("注意：当前是 StubClient 假模型，分数仅用于验证流程，不代表真实水平。")
     print("=" * 72)
@@ -279,8 +342,11 @@ def print_report(results: list[CaseResult], client_name: str) -> None:
         extracted = "-"
         if r.expect == "solve":
             extracted = _summary(r.extracted, limit=24) if r.extracted else "未提取到"
-        print(f"{r.id:10s} | {r.topic:6s} | {r.kind:4s} | {_status(r):6s} | "
-              f"提取={extracted:24s} | {_summary(r.answer)}")
+        line = (f"{r.id:10s} | {r.topic:6s} | {r.kind:4s} | {_status(r):6s} | "
+                f"提取={extracted:24s} | {_summary(r.answer)}")
+        if r.review_note:
+            line += f" | 复核={_summary(r.review_note, 36)}"
+        print(line)
 
     total_elapsed = sum(r.elapsed for r in results)
     failed = [r.id for r in results if r.verdict is not Verdict.PASS]
@@ -290,6 +356,26 @@ def print_report(results: list[CaseResult], client_name: str) -> None:
     print(f"solve：{summary.solve_pass}/{summary.solve_total} 通过"
           f"（{_rate(summary.solve_pass, summary.solve_total)}），"
           f"失败 {summary.solve_fail}，不确定 {summary.solve_uncertain}")
+    if any(r.first_verdict is not None for r in results):
+        first_pass = sum(
+            1 for r in results
+            if r.expect == "solve"
+            and (r.first_verdict or r.verdict) is Verdict.PASS
+        )
+        manual = sum(
+            1 for r in results
+            if r.expect == "solve"
+            and r.manual_review
+            and r.verdict is Verdict.PASS
+        )
+        print(f"其中首轮通过 {first_pass}/{summary.solve_total}"
+              f"（{_rate(first_pass, summary.solve_total)}），"
+              f"复核改判 +{summary.solve_pass - first_pass}")
+        if manual:
+            strict = summary.solve_pass - manual
+            print(f"注意：其中 {manual} 道证明题是复核建议通过、尚未人工确认；"
+                  f"严格自动通过为 {strict}/{summary.solve_total}"
+                  f"（{_rate(strict, summary.solve_total)}）。")
     if summary.refuse_total:
         print(f"refuse：{summary.refuse_pass}/{summary.refuse_total} 正确拒答"
               f"（{_rate(summary.refuse_pass, summary.refuse_total)}），"
@@ -348,6 +434,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0,
         help="只跑前 N 题，0 表示全部（用于冒烟测试）",
     )
+    parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="启用独立复核：首轮未通过的题由全新上下文复核，必要时反馈重解一次",
+    )
     return parser.parse_args(argv)
 
 
@@ -403,12 +494,13 @@ def main(argv: list[str] | None = None) -> int:
     trace_path = None if args.no_trace else new_trace_file(args.trace_dir)
 
     agent = Agent(client=client)
-    results = run_all(agent, cases, trace_path)
+    verifier = Verifier(client) if args.verify else None
+    results = run_all(agent, cases, trace_path, verifier)
 
     client_name = type(client).__name__
     if args.real:
         client_name = f"{client_name} / {client.model}"
-    print_report(results, client_name)
+    print_report(results, client_name, verified=args.verify)
     if trace_path is not None:
         print(f"轨迹文件：{trace_path}")
         print(f"轨迹汇总：python -m eval.trace_report {trace_path}")

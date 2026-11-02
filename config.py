@@ -18,3 +18,8 @@ load_dotenv()
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "")
+
+# 默认不传 temperature，沿用接口默认值。
+# 实测把温度设为 0 会让模型反复重试同一个失败的 sympy 验证，反而撞步数上限。
+_temperature = os.getenv("OPENAI_TEMPERATURE", "").strip()
+OPENAI_TEMPERATURE: float | None = float(_temperature) if _temperature else None

@@ -165,3 +165,59 @@ def test_agent_emits_trace_events(tmp_path):
     assert record["final_answer"] == "最终答案：1/2"
     assert record["verdict"] == "pass"
     assert (tmp_path / "trace.jsonl").exists()
+
+
+# ---------- 超时重试 ----------
+
+class SlowOnceClient:
+    """第一次调用超时，第二次正常返回。"""
+
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        if self.calls == 1:
+            import time
+            time.sleep(self.delay)
+        return LLMResponse(content="最终答案：1/2")
+
+
+class SlowAlwaysClient(SlowOnceClient):
+    """每次调用都超时。"""
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        import time
+        time.sleep(self.delay)
+        return LLMResponse(content="最终答案：1/2")
+
+
+def test_timeout_is_retried_once():
+    """单次超时不应直接判失败，重试成功应正常返回答案。"""
+    client = SlowOnceClient(delay=0.2)
+    answer = Agent(client=client, step_timeout=0.05).run("测试题")
+
+    assert answer == "最终答案：1/2"
+    assert client.calls == 2
+
+
+def test_two_consecutive_timeouts_stop_the_run():
+    """连续两次超时才停止，并明确说明是两次。"""
+    client = SlowAlwaysClient(delay=0.2)
+    answer = Agent(client=client, step_timeout=0.05).run("测试题")
+
+    assert "连续两次超时" in answer
+    assert client.calls == 2
+
+
+# ---------- 自定义系统提示词 ----------
+
+def test_custom_system_prompt_replaces_default():
+    """复核器需要换一套提示词，不应再叠加解题助手的规则。"""
+    client = RecordingClient()
+    Agent(client=client, system_prompt="你是复核员").run("测试题")
+
+    system = _find(client.requests[0], "system")
+    assert system["content"] == "你是复核员"

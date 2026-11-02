@@ -220,10 +220,17 @@ def judge_answer(expect: str | None, actual: str | None, method: str = "symbolic
 
 # ---------- 多小问与证明题判定 ----------
 
+# 标签后面可能还跟着下标/上标或括号说明，例如
+# (S_1+S_2)_{min}、S_{min}、V_x。允许这些修饰词后再匹配 "="。
+_LABEL_QUALIFIER = (
+    r"(?:\s*\)?\s*[_^]\s*(?:\{[^{}]{0,20}\}|[A-Za-z0-9]{1,10}))?"
+)
+
+
 def _label_pattern(label: str) -> str:
     """把标签转成可在压缩空白后的答案文本里匹配的正则。"""
     normalized = re.sub(r"\s+", "", normalize_math_text(label))
-    pattern = re.escape(normalized)
+    pattern = re.escape(normalized) + _LABEL_QUALIFIER
     if re.fullmatch(r"[A-Za-z]", normalized):
         # 单字母标签（如 a）不能匹配到单词内部
         pattern = rf"(?<![A-Za-z]){pattern}(?![A-Za-z])"
@@ -244,10 +251,18 @@ def extract_labeled_value(text: str, labels: list[str]) -> str | None:
     for label in labels:
         if not label:
             continue
+        pattern = _label_pattern(label)
         match = re.search(
-            _label_pattern(label) + r"(?:=|:|：|为)([^,，;；、\n]+)",
+            pattern + r"(?:=|:|：|为)([^,，;；、\n]+)",
             normalized,
         )
+        if not match and re.search(r"[一-鿿]", label):
+            # 中文标签常直接跟数值而不写等号，例如“最小值 1/3-√2/6”。
+            # 只接受以数字或数学符号开头的值，避免把后面的 “V=...” 吞进来。
+            match = re.search(
+                pattern + r"([0-9+\\\[({√π.\-][^,，;；、\n]*)",
+                normalized,
+            )
         if match:
             value = match.group(1).strip().strip("。.$")
             if value:

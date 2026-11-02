@@ -176,6 +176,17 @@ def test_parts_wrong_subanswer_fails():
     assert judge_parts(PARTS, text) is Verdict.FAIL
 
 
+def test_parts_handles_parenthesized_subscript_label():
+    """2025-J2 的真实写法：(S_1+S_2)_{min} 也要能抽到 S_1+S_2。"""
+    parts = [{
+        "labels": ["S_1+S_2"],
+        "answer": "(2-sqrt(2))/6",
+        "judge": "symbolic",
+    }]
+    text = r"最终答案：$(S_1+S_2)_{\min}=\frac13-\frac{\sqrt2}{6}$"
+    assert judge_parts(parts, text) is Verdict.PASS
+
+
 # ---------- rubric：证明题关键步骤 ----------
 
 RUBRIC = [
@@ -207,6 +218,34 @@ def test_rubric_keeps_function_name_case():
     assert judge_rubric(checks, "F(x)≥0") is Verdict.PASS
 
 
+def test_rubric_accepts_alternative_minimum_proof():
+    """2025-J3 的真实替代证明：用 F 的最小值点论证，不构造 e^{-x}F。"""
+    from eval.run_eval import load_cases
+
+    case = next(c for c in load_cases() if c["id"] == "2025-J3")
+    text = (
+        r"工具验证确认恒等式 $F-F'=f$ 成立。"
+        r"$F$ 若取负，则其最小值点必使 $F=f$，而 $f\ge0$ 排除这种可能。"
+        "同时 $n$ 为偶数、首项为正保证了 $F$ 在无穷远处正向发散，"
+        "最小值确实存在，从而论证闭合。最终答案：得证"
+    )
+    assert judge_rubric(case["rubric"], text) is Verdict.PASS
+
+
+def test_rubric_accepts_inequality_forms():
+    """2024-J3：用 a_{n+1}≤a_n 和反向不等式写上下界，也应通过。"""
+    from eval.run_eval import load_cases
+
+    case = next(c for c in load_cases() if c["id"] == "2024-J3")
+    text = (
+        r"(1) 因 $0<a_n\le\frac{\pi}{4}$ 且 $a_{n+1}\le a_n$，"
+        r"由单调有界准则 $\{a_n\}$ 收敛；"
+        r"(2) $a_n+a_{n-2}=\frac{1}{n-1}$；"
+        r"(3) $\frac{1}{2(n+1)}<a_n<\frac{1}{2(n-1)}$。最终答案：得证"
+    )
+    assert judge_rubric(case["rubric"], text) is Verdict.PASS
+
+
 # ---------- 统一入口的边界情况 ----------
 
 def test_none_answers():
@@ -225,3 +264,12 @@ def test_never_raises_on_weird_input():
     for expect, actual in [("", ""), ("1/0", "1/0"), ("sin(", "1"), ("None", "None")]:
         result = judge_answer(expect, actual, "symbolic")
         assert isinstance(result, Verdict)
+
+
+def test_parts_accepts_chinese_label_without_equals():
+    """2025-J2 的真实写法：中文标签后直接跟数值，没有等号。"""
+    from eval.run_eval import load_cases
+
+    case = next(c for c in load_cases() if c["id"] == "2025-J2")
+    text = "最终答案：a=√2/2，最小值 1/3−√2/6，体积 V=(1+√2)π/30"
+    assert judge_parts(case["parts"], text) is Verdict.PASS

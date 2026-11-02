@@ -110,9 +110,13 @@ class OpenAIClient:
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        temperature: float | None = None,
     ) -> None:
         """参数为空时回落到 config.py 中读取的 .env 配置。"""
         self.model: str = model or config.OPENAI_MODEL
+        self.temperature: float | None = (
+            config.OPENAI_TEMPERATURE if temperature is None else temperature
+        )
         self._client = OpenAI(
             api_key=api_key or config.OPENAI_API_KEY,
             base_url=base_url or config.OPENAI_BASE_URL or None,
@@ -133,6 +137,8 @@ class OpenAIClient:
             LLMResponse: content 与 tool_calls 的统一定义
         """
         kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         if tools:
             kwargs["tools"] = tools
 

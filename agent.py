@@ -18,7 +18,9 @@ from tools import run_tool
 
 # ---------- 常量与系统提示词 ----------
 
-MAX_STEPS = 10          # 单次求解最多问模型 10 轮，防止无限循环烧额度
+MAX_STEPS = 15          # 单次求解最多问模型 15 轮，防止无限循环烧额度。
+                        # 34 道真题实测最长 14 轮（2025-F6、2025-F1）；
+                        # 放到 25 轮没有多通过一题，只是更慢。
 STEP_TIMEOUT = 30.0     # 单轮模型调用的超时时间（秒）
 
 SYSTEM_PROMPT = r"""你是一名数学竞赛解题助手，请按下面的规则回答：
@@ -127,6 +129,7 @@ class Agent:
         step_timeout: float = STEP_TIMEOUT,
         verbose: bool = False,
         retrieval: bool = False,
+        system_prompt: str | None = None,
     ) -> None:
         """初始化。
 
@@ -138,12 +141,15 @@ class Agent:
             verbose: 是否打印每一步的过程，演示和调试时打开
             retrieval: 是否开放真题库检索工具。默认关闭，
                        这样没构建题库时也能正常跑原有流程。
+            system_prompt: 覆盖默认解题提示词。评测的独立复核器用它切换成
+                           “阅卷员”角色；网页与命令行仍使用默认提示词。
         """
         self.client = client or StubClient()
         self.max_steps = max_steps
         self.step_timeout = step_timeout
         self.verbose = verbose
         self.retrieval = retrieval
+        self.system_prompt = system_prompt
         self.tools_schema = TOOLS_SCHEMA + (
             RETRIEVAL_TOOL_SCHEMA if retrieval else []
         )
@@ -167,10 +173,10 @@ class Agent:
             str: 模型的最终文字答案；触发护栏时返回明确的错误提示。
         """
         history = clean_history(history)
-        system_prompt = SYSTEM_PROMPT
-        if history:
+        system_prompt = self.system_prompt or SYSTEM_PROMPT
+        if history and self.system_prompt is None:
             system_prompt += FOLLOWUP_PROMPT
-        if self.retrieval:
+        if self.retrieval and self.system_prompt is None:
             system_prompt += RETRIEVAL_PROMPT
         if history or self.retrieval:
             self._emit(
@@ -190,20 +196,39 @@ class Agent:
 
         for step in range(1, self.max_steps + 1):
             chat_start = time.perf_counter()
-            try:
-                resp = self._chat_with_timeout(messages)
-            except FutureTimeoutError:
-                # 超时视为该步失败并立即停止，避免连续超时累计等待
-                message = (
-                    f"错误：第 {step} 步调用模型超时"
-                    f"（超过 {self.step_timeout} 秒），该步记为失败，已停止。"
-                )
-                self._emit(trace, "error", step=step, kind="timeout", message=message)
-                return message
-            except Exception as e:
-                message = f"错误：第 {step} 步调用模型失败（{type(e).__name__}: {e}）。"
-                self._emit(trace, "error", step=step, kind="llm_error", message=message)
-                return message
+            # 网络抖动导致的单次超时很常见，重试一次即可恢复；
+            # 连续两次超时才判定该题失败，避免白白丢掉一道能做对的题。
+            for attempt in (1, 2):
+                try:
+                    resp = self._chat_with_timeout(messages)
+                    break
+                except FutureTimeoutError:
+                    if attempt == 2:
+                        message = (
+                            f"错误：第 {step} 步调用模型连续两次超时"
+                            f"（每次超过 {self.step_timeout} 秒），"
+                            "该步记为失败，已停止。"
+                        )
+                        self._emit(
+                            trace, "error", step=step, kind="timeout", message=message
+                        )
+                        return message
+                    self._emit(
+                        trace,
+                        "error",
+                        step=step,
+                        kind="timeout_retry",
+                        message=f"第 {step} 步调用模型超时，自动重试一次。",
+                    )
+                except Exception as e:
+                    message = (
+                        f"错误：第 {step} 步调用模型失败"
+                        f"（{type(e).__name__}: {e}）。"
+                    )
+                    self._emit(
+                        trace, "error", step=step, kind="llm_error", message=message
+                    )
+                    return message
 
             self._emit(
                 trace,

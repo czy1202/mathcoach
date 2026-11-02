@@ -20,9 +20,10 @@ from mathparse import normalize_math_text
 
 # 答案标记：最终答案 / 答案 / final answer，后面可以跟冒号，也可以跟“是/为”。
 # 兼容 Markdown 粗体：**最终答案**：1/2
+# 这里只匹配标记本身，答案正文由调用方从标记末尾截到行尾。
 _MARKER_RE = re.compile(
     r"(?:\*\*|__)?\s*(?:最终\s*答案|答案|final\s*answer|answer)"
-    r"\s*(?:\*\*|__)?\s*(?:[:：]|是|为)\s*(?P<ans>[^\n]*)",
+    r"\s*(?:\*\*|__)?\s*(?:[:：]|是|为)",
     re.IGNORECASE,
 )
 
@@ -69,8 +70,14 @@ def _normalize_latex(s: str) -> str:
     return normalize_math_text(s)
 
 
-def _clean(raw: str) -> str:
-    """把一段候选文本清洗成答案字符串。"""
+def _clean(raw: str, strip_assignment: bool = True) -> str:
+    """把一段候选文本清洗成答案字符串。
+
+    Args:
+        raw: 候选文本
+        strip_assignment: 是否去掉 "x = 1/2" 这类左值。多小问判分需要保留
+            "f(0)=-3" 的标签，此时传 False。
+    """
     s = _strip_wrappers(raw)
     s = _TRAILING_CLAUSE_RE.sub("", s).strip()
     s = _strip_wrappers(s)
@@ -89,9 +96,10 @@ def _clean(raw: str) -> str:
         return m.group(1).upper()
 
     # x = 1/2 这类带左值的答案，只保留右边
-    m = _EQ_RE.match(s)
-    if m and "=" not in m.group("rhs"):
-        s = m.group("rhs").strip()
+    if strip_assignment:
+        m = _EQ_RE.match(s)
+        if m and "=" not in m.group("rhs"):
+            s = m.group("rhs").strip()
 
     return s.strip()
 
@@ -104,6 +112,7 @@ def _looks_like_answer(text: str) -> bool:
 def extract_final_answer(
     text: str | None,
     allow_fallback: bool = True,
+    strip_assignment: bool = True,
 ) -> str | None:
     """从整段回答中提取最终答案。
 
@@ -112,12 +121,15 @@ def extract_final_answer(
         allow_fallback: 没有答案标记时，是否退化为“最后一行像答案的文本”。
             评测和完整解答需要兜底；追问回答通常没有固定答案行，传 False
             可以避免把一句解释误当成答案。
+        strip_assignment: 是否去掉 "x = 1/2" 的左值。多小问判分要保留
+            "f(0)=-3" 的标签，传 False。
 
     Returns:
         str | None: 清洗后的答案；找不到任何可用内容时返回 None。
 
     规则：
-        1. 从后往前找最后一个答案标记，取该行标记之后的内容；
+        1. 从后往前找最后一个答案标记；同一行有多个标记时取最后一个，
+           避免模型在答案后追加“最终答案：B”之类的自我修正说明；
         2. 标记后为空时，取下一行非空内容；
         3. 完全没有标记且 allow_fallback=True 时，退化为最后一行
            “像答案”的文本；
@@ -129,15 +141,17 @@ def extract_final_answer(
     lines = text.splitlines()
 
     for idx in range(len(lines) - 1, -1, -1):
-        match = _MARKER_RE.search(lines[idx])
-        if not match:
+        markers = list(_MARKER_RE.finditer(lines[idx]))
+        if not markers:
             continue
 
-        candidate = match.group("ans")
+        # 同一行可能先写“最终答案：B”，再追加解释后又写一次“最终答案：B”。
+        # 取最后一个标记，才能拿到真正的结尾答案。
+        candidate = lines[idx][markers[-1].end():]
         if not candidate.strip():
             candidate = next((line for line in lines[idx + 1:] if line.strip()), "")
 
-        result = _clean(candidate)
+        result = _clean(candidate, strip_assignment)
         if result:
             return result
 
@@ -145,7 +159,7 @@ def extract_final_answer(
         return None
 
     for line in reversed(lines):
-        cleaned = _clean(line)
+        cleaned = _clean(line, strip_assignment)
         if _looks_like_answer(cleaned):
             return cleaned
 

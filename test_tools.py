@@ -42,6 +42,42 @@ def test_non_equivalent_expressions_return_false(expr_a, expr_b):
     assert verify_with_sympy(expr_a, expr_b) is False
 
 
+# ---------- verify_with_sympy：化简不动但数值相等 ----------
+
+def test_numerically_equal_integrals_return_true():
+    """2024-F5 的真实卡点：两个积分都等于 1/3，但 simplify 化不归零。
+
+    旧实现此时返回 False，模型会以为等式错了，反复重试同一个调用直到撞步数上限。
+    """
+    assert verify_with_sympy(
+        "integrate(x*log(1+exp(x)),(x,-1,1))",
+        "integrate(x**2/2,(x,-1,1))",
+    ) is True
+    assert verify_with_sympy(
+        "integrate(x*log(1+exp(x)),(x,-1,1))",
+        "1/3",
+    ) is True
+
+
+def test_numerically_different_integrals_return_false():
+    """数值比较也要能明确判出不等价。"""
+    assert verify_with_sympy(
+        "integrate(exp(x**2),(x,0,1))",
+        "integrate(exp(x**2),(x,0,2))",
+    ) is False
+
+
+def test_unsettled_identity_returns_explanation_not_false():
+    """抽样一致但符号化简失败时，应返回“无法判定”文本，而不是 False。
+
+    这样模型知道是工具算不动，不会把“没验出来”当成“等式错了”。
+    """
+    result = verify_with_sympy("sqrt(1-cos(x)**2)", "sin(x)")
+    assert isinstance(result, str)
+    assert result.startswith("无法判定")
+    assert "不要重复" in TOOLS["verify_with_sympy"]["描述"]
+
+
 # ---------- verify_with_sympy：非法输入（应返回 False，不抛异常）----------
 
 @pytest.mark.parametrize(

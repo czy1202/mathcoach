@@ -8,7 +8,9 @@ v1 阶段输入来自本地自测，暂时接受这个风险；后期接入真�
 """
 
 import json
+import math
 import os
+import random
 import re
 import threading
 from pathlib import Path
@@ -19,21 +21,44 @@ import sympy as sp
 from mathparse import parse_math
 
 
-def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool:
+def _numeric_value(expr: Any) -> float | None:
+    """把不含自由变量的表达式算成有限实数；算不出来返回 None。
+
+    sympy 对部分积分会留下 NonElementaryIntegral，直接 evalf 不会数值积分。
+    这里先把 Integral 子式转成普通 Integral 再 evalf。
+    """
+    try:
+        evaluated = expr.replace(
+            lambda e: isinstance(e, sp.Integral),
+            lambda e: sp.Integral(e.function, *e.limits).evalf(15),
+        )
+        value = sp.N(evaluated, 15)
+        if value.is_real is not True:
+            return None
+        number = float(value)
+    except Exception:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool | str:
     """判断两个数学表达式是否等价。
 
-    原理：把两个表达式相减后化简，结果为 0 即认为等价。
+    先做符号化简；化简不归零时，再对不含自由变量的常数表达式做高精度
+    数值比较。仍然无法判断时返回“无法判定：...”文本，而不是 False，
+    避免模型把“工具算不出来”误当成“这个等式是错的”并反复重试。
 
     Args:
         expr_a: 第一个表达式，字符串，例如 "sin(x)**2 + cos(x)**2"
         expr_b: 第二个表达式，字符串，例如 "1"
 
     Returns:
-        bool: 等价返回 True；不等价、表达式非法、参数错误一律返回 False。
+        True: 明确等价；
+        False: 明确不等价（常数差明显非零，或抽样点已出现差异）；
+        str: 无法判定，调用方应换一种写法或改用其他方法验证。
 
     注意：
-        1. 解析失败与"不等价"都返回 False，调用方无法区分二者。
-           需要区分时，应改用返回 CheckResult 的版本（后续步骤再做）。
+        1. 解析失败仍返回 False；这是调用方参数写错，而不是数学结论。
         2. 符号化简不检查定义域。例如 (x**2-1)/(x-1) 与 x+1 会被判为等价，
            但前者在 x=1 处无定义。
         3. simplify 是启发式算法，极复杂的表达式可能化简不到 0。
@@ -41,16 +66,64 @@ def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool:
     try:
         a = parse_math(expr_a)
         b = parse_math(expr_b)
-        return bool(sp.simplify(a - b) == 0)
     except Exception:
         # SympifyError / TypeError / ValueError 等一律归为本次验证失败
         return False
+
+    diff = a - b
+    try:
+        if sp.simplify(diff) == 0:
+            return True
+    except Exception:
+        pass
+
+    symbols = sorted(a.free_symbols | b.free_symbols, key=str)
+
+    # 不含自由变量：直接高精度数值比较，解决 simplify 化简不动积分的问题。
+    if not symbols:
+        first = _numeric_value(a)
+        second = _numeric_value(b)
+        if first is not None and second is not None:
+            scale = max(1.0, abs(first), abs(second))
+            return abs(first - second) <= 1e-9 * scale
+        return "无法判定：符号化简未归零，且常数表达式无法数值求值。"
+
+    # 含自由变量：只做抽样反证。抽样出现差异就明确返回 False；
+    # 抽样都一致也不轻易判 True，避免“只在样本点相等”的假阳性。
+
+    rng = random.Random(20261021)
+    compared = 0
+    for _ in range(6):
+        point = {s: sp.Float(round(rng.uniform(0.3, 2.7), 6)) for s in symbols}
+        try:
+            left = _numeric_value(a.subs(point))
+            right = _numeric_value(b.subs(point))
+        except Exception:
+            continue
+        if left is None or right is None:
+            continue
+        compared += 1
+        scale = max(1.0, abs(left), abs(right))
+        if abs(left - right) > 1e-6 * scale:
+            return False
+
+    if compared:
+        return (
+            "无法判定：符号化简未归零，但 "
+            f"{compared} 个数值抽样点的结果一致；请换一种等价写法、"
+            "或改用极限/求导/积分等更具体的方式验证。"
+        )
+    return "无法判定：符号化简未归零，且无法用数值抽样比较。"
 
 
 TOOLS: dict[str, dict] = {
     "verify_with_sympy": {
         "函数": verify_with_sympy,
-        "描述": "判断两个数学表达式是否等价。等价返回 True，否则返回 False。",
+        "描述": (
+            "判断两个数学表达式是否等价。等价返回 True，不等价返回 False；"
+            "若 sympy 化简不动、但数值抽样看不出差异，返回以“无法判定”开头的说明。"
+            "收到“无法判定”时不要重复同一个调用，应换一种等价写法或改用其他验证方式。"
+        ),
         "参数说明": {
             "expr_a": "第一个表达式，字符串，例如 'sin(x)**2 + cos(x)**2'",
             "expr_b": "第二个表达式，字符串，例如 '1'",

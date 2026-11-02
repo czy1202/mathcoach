@@ -63,6 +63,15 @@ def test_last_marker_wins():
     assert extract_final_answer(text) == "1/2"
 
 
+def test_last_marker_wins_on_same_line():
+    """2025-C4 的真实回答：同一行重复标记后再写一次最终答案。"""
+    text = (
+        "最终答案：B。为符合规则，前面给简短说明？用户说只回答选项字母。"
+        "规则要求最后一行“最终答案：B”。我给极少正文。最终答案：B"
+    )
+    assert extract_final_answer(text) == "B"
+
+
 def test_fallback_to_last_answer_like_line():
     assert extract_final_answer("经过计算。\n0.5") == "0.5"
 
@@ -77,3 +86,10 @@ def test_fallback_skips_chatter():
 @pytest.mark.parametrize("text", [None, "", "   \n  "])
 def test_empty_returns_none(text):
     assert extract_final_answer(text) is None
+
+
+def test_keep_assignment_for_parts_judging():
+    """多小问判分需要保留 f(0)=-3 的标签。"""
+    text = "最终答案：$f(0)=-3$"
+    assert extract_final_answer(text) == "-3"
+    assert extract_final_answer(text, strip_assignment=False) == "f(0)=-3"
