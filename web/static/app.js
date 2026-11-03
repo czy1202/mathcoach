@@ -33,6 +33,7 @@
   const ocrPreview = document.getElementById("ocr-preview");
   const ocrPreviewBody = document.getElementById("ocr-preview-body");
   const ocrPreviewClose = document.getElementById("ocr-preview-close");
+  const ocrImage = document.getElementById("ocr-image");
   const ocrStatus = document.getElementById("ocr-status");
   const ocrStatusText = document.getElementById("ocr-status-text");
   const ocrSpinner = document.getElementById("ocr-spinner");
@@ -40,11 +41,16 @@
 
   const DEFAULT_PLACEHOLDER = input.placeholder;
   const MAX_OCR_BYTES = 10 * 1024 * 1024;
+  // 整页图面积大、竖长；小根号/上标在整页里最容易认错，提示用户裁单题。
+  const OCR_PAGE_AREA = 1500000;
   let busy = false;
   let ocrBusy = false;
   let ocrProvider = "ollama";
   let ocrStatusTimer = null;
   let ocrPreviewTimer = null;
+  let ocrImageUrl = null;
+  let ocrAbort = null;
+  let ocrRequestId = 0;
   let sessionId = null;
 
   let mode = null; // null = 模式选择页
@@ -1086,18 +1092,25 @@
     input.style.height = `${Math.min(input.scrollHeight, 300)}px`;
   }
 
+  function updateControls() {
+    // 识别期间不允许发送，避免 OCR 结果晚到后插进已经发出的问题里
+    sendBtn.disabled = busy || ocrBusy;
+    newChatBtn.disabled = busy;
+    input.disabled = busy;
+    if (ocrBtn) ocrBtn.disabled = busy || ocrBusy;
+    if (homeBtn) homeBtn.disabled = busy;
+    sendBtn.querySelector(".send-label").textContent = busy ? "求解中" : "发送";
+  }
+
   function setBusy(next) {
     busy = next;
-    sendBtn.disabled = next;
-    newChatBtn.disabled = next;
-    input.disabled = next;
-    if (ocrBtn) ocrBtn.disabled = next || ocrBusy;
-    if (homeBtn) homeBtn.disabled = next;
-    sendBtn.querySelector(".send-label").textContent = next ? "求解中" : "发送";
+    updateControls();
   }
 
   function startNewChat() {
     if (busy) return;
+    // 识别还没回来就开新对话时，旧结果不能插进新输入框
+    if (ocrBusy) cancelOcr();
 
     // 新对话始终回到“问题目”，避免在真题页清空聊天后看不见结果
     setMode("solve");
@@ -1157,12 +1170,30 @@
     }
     ocrStatus.hidden = false;
     ocrStatus.className = `ocr-status ${kind}`;
-    ocrStatusText.textContent = message;
-    ocrSpinner.hidden = kind !== "loading";
-    // 识别中不允许关掉提示；成功提示过一会儿自动收起，错误保留给用户看
-    ocrStatusClose.hidden = kind === "loading";
+    if (ocrStatusText) ocrStatusText.textContent = message;
+    if (ocrSpinner) ocrSpinner.hidden = kind !== "loading";
+    // 识别中按钮变成“取消”，成功提示过一会儿自动收起，错误保留给用户看
+    if (ocrStatusClose) {
+      ocrStatusClose.hidden = false;
+      ocrStatusClose.title = kind === "loading" ? "取消识别" : "关闭提示";
+      ocrStatusClose.setAttribute(
+        "aria-label",
+        kind === "loading" ? "取消识别" : "关闭识别提示",
+      );
+    }
     if (kind === "ok") {
       ocrStatusTimer = setTimeout(clearOcrStatus, 12000);
+    }
+  }
+
+  function clearOcrImage() {
+    if (ocrImage) {
+      ocrImage.hidden = true;
+      ocrImage.removeAttribute("src");
+    }
+    if (ocrImageUrl) {
+      URL.revokeObjectURL(ocrImageUrl);
+      ocrImageUrl = null;
     }
   }
 
@@ -1174,6 +1205,20 @@
     if (!ocrPreview) return;
     ocrPreview.hidden = true;
     if (ocrPreviewBody) ocrPreviewBody.innerHTML = "";
+    clearOcrImage();
+  }
+
+  function cancelOcr() {
+    // 让在途响应失效；服务端可能还在跑，但结果不会再写回输入框
+    ocrRequestId += 1;
+    if (ocrAbort) {
+      ocrAbort.abort();
+      ocrAbort = null;
+    }
+    ocrBusy = false;
+    updateControls();
+    clearOcrStatus();
+    hideOcrPreview();
   }
 
   function renderOcrPreview() {
@@ -1190,6 +1235,30 @@
     if (!ocrPreview) return;
     ocrPreview.hidden = false;
     renderOcrPreview();
+  }
+
+  function showOcrPreviewLoading() {
+    if (!ocrPreview || !ocrPreviewBody) return;
+    ocrPreview.hidden = false;
+    ocrPreviewBody.innerHTML =
+      '<p class="ocr-preview-wait">正在识别，完成后可在这里对照原图校对。</p>';
+  }
+
+  async function imageLooksLikePage() {
+    if (!ocrImage) return false;
+    try {
+      await ocrImage.decode();
+    } catch {
+      return false;
+    }
+    const width = ocrImage.naturalWidth;
+    const height = ocrImage.naturalHeight;
+    return (
+      width > 0 &&
+      height > 0 &&
+      width * height > OCR_PAGE_AREA &&
+      height > width * 1.05
+    );
   }
 
   function scheduleOcrPreview() {
@@ -1222,13 +1291,27 @@
       showOcrStatus("只支持 PNG / JPG / BMP 图片，请换一种格式。", "error");
       return;
     }
+    if (ocrProvider === "ollama" && /^image\/bmp$/i.test(file.type || "")) {
+      showOcrStatus("本地识别只支持 PNG / JPG 图片，请换一种格式。", "error");
+      return;
+    }
     if (file.size > MAX_OCR_BYTES) {
       showOcrStatus("图片超过 10 MB，请压缩或裁剪后再上传。", "error");
       return;
     }
 
+    // 先显示原图，识别完成后和文本并排校对
+    clearOcrImage();
+    ocrImageUrl = URL.createObjectURL(file);
+    if (ocrImage) {
+      ocrImage.src = ocrImageUrl;
+      ocrImage.hidden = false;
+    }
+
+    const requestId = ++ocrRequestId;
     ocrBusy = true;
-    if (ocrBtn) ocrBtn.disabled = true;
+    updateControls();
+    showOcrPreviewLoading();
     showOcrStatus(
       ocrProvider === "ollama"
         ? "正在用本地模型识别（首次加载会慢一些）…"
@@ -1236,12 +1319,27 @@
       "loading",
     );
 
+    const isPage = await imageLooksLikePage();
+    if (requestId !== ocrRequestId) return;
+    if (isPage) {
+      showOcrStatus(
+        "整页图片识别较慢，小根号/上标容易错；建议先裁到单题。",
+        "loading",
+      );
+    }
+
     const body = new FormData();
     body.append("file", file, file.name || "problem.png");
+    ocrAbort = new AbortController();
 
     try {
-      const response = await fetch("/api/ocr", { method: "POST", body });
+      const response = await fetch("/api/ocr", {
+        method: "POST",
+        body,
+        signal: ocrAbort.signal,
+      });
       const data = await response.json().catch(() => ({}));
+      if (requestId !== ocrRequestId) return;
       if (!response.ok) {
         throw new Error(errorText(data.detail, response.status));
       }
@@ -1257,23 +1355,31 @@
       const confidenceText = Number.isFinite(confidence) && confidence > 0
         ? `（置信度 ${Math.round(confidence * 100)}%）`
         : "";
+      const reviewHint = isPage
+        ? "整页图请重点核对根号指数、上标和阶乘范围。"
+        : "核对公式后发送。";
       showOcrStatus(
         truncated
           ? "识别结果超过 5000 字，已截断；请删掉不需要的题目后再发送。"
-          : `已识别${confidenceText}并填入输入框；整页多题时删掉不需要的，核对公式后发送。`,
+          : `已识别${confidenceText}并填入输入框；${reviewHint}`,
         truncated ? "error" : "ok",
       );
     } catch (err) {
+      if (requestId !== ocrRequestId || err.name === "AbortError") return;
+      hideOcrPreview();
       showOcrStatus(err.message || "图片识别失败，请稍后重试。", "error");
     } finally {
-      ocrBusy = false;
-      if (ocrBtn) ocrBtn.disabled = busy;
+      if (requestId === ocrRequestId) {
+        ocrBusy = false;
+        ocrAbort = null;
+        updateControls();
+      }
     }
   }
 
   async function submitQuestion() {
     const question = input.value.trim();
-    if (!question || busy) return;
+    if (!question || busy || ocrBusy) return;
 
     clearOcrStatus();
     hideOcrPreview();
@@ -1385,11 +1491,23 @@
   }
 
   if (ocrStatusClose) {
-    ocrStatusClose.addEventListener("click", clearOcrStatus);
+    ocrStatusClose.addEventListener("click", () => {
+      if (ocrBusy) {
+        cancelOcr();
+      } else {
+        clearOcrStatus();
+      }
+    });
   }
 
   if (ocrPreviewClose) {
-    ocrPreviewClose.addEventListener("click", hideOcrPreview);
+    ocrPreviewClose.addEventListener("click", () => {
+      if (ocrBusy) {
+        cancelOcr();
+      } else {
+        hideOcrPreview();
+      }
+    });
   }
 
   // 直接 Ctrl+V 粘贴截图，比先存文件再上传顺手

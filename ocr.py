@@ -43,12 +43,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import secrets
 import string
 import time
 from dataclasses import dataclass
 
 import httpx
+from PIL import Image, ImageOps
 
 import config
 
@@ -59,6 +61,15 @@ REQUEST_TIMEOUT = 60.0
 # GLM-OCR 的整页识别提示。模型按任务前缀训练，改写成自然语言可能降低
 # 稳定性；需要换模型时通过 OLLAMA_OCR_PROMPT 覆盖。
 DEFAULT_OLLAMA_PROMPT = "Text Recognition:"
+
+# 小图放大。模型内部会把图片缩到固定的视觉分辨率，整页大图再放大没有
+# 收益；但单题裁剪图（约 1300px 宽）里的小符号会认错，实测 2025 年第 1
+# 道选择题的 e^{∛x} 被读成 e^{√x}：清晰图 1700px 宽即可恢复，手机退化图
+# 要到 1800px，继续放大到 3000px 反而又认错。统一取 2000px，给退化留余量。
+# 面积上限用来排除整页截图，避免白白增加计算量。
+_UPSCALE_WIDTH = 2000
+_UPSCALE_MAX_AREA = 1_500_000
+_UPSCALE_MAX_FACTOR = 2.5
 
 # SimpleTex 文档写的是 jpg / png / bmp，不支持的格式宁可本地拒绝，
 # 也不要上传后换来一个含糊的远端错误。
@@ -273,11 +284,51 @@ def _clean_ocr_text(text: str) -> str:
     return "\n".join(body).strip()
 
 
+def _prepare_image(image: bytes, extension: str) -> bytes:
+    """按 EXIF 摆正方向，并把小图放大到约 2000px 宽。
+
+    浏览器展示图片时会按 EXIF 自动转正，但 llama.cpp 不会；竖着拍的手机
+    照片如果原样发送，模型看到的是横躺的整页。小图放大则是对策：模型内部
+    的视觉分辨率是固定的，单题小图里 ∛ 这类细符号容易被压没。
+
+    只在确实需要时重新编码，避免把一张大照片转成几十 MB 的 PNG。
+    """
+    try:
+        with Image.open(io.BytesIO(image)) as source:
+            orientation = source.getexif().get(0x0112, 1)
+            img = ImageOps.exif_transpose(source)
+            rotated = orientation != 1
+
+            factor = 1.0
+            width, height = img.size
+            if width < _UPSCALE_WIDTH and width * height <= _UPSCALE_MAX_AREA:
+                factor = min(_UPSCALE_MAX_FACTOR, _UPSCALE_WIDTH / width)
+            if factor >= 1.05:
+                img = img.resize(
+                    (round(width * factor), round(height * factor)),
+                    Image.Resampling.LANCZOS,
+                )
+            elif not rotated:
+                return image
+
+            buffer = io.BytesIO()
+            if extension == "jpg":
+                # 手机照片本身有损，再存 PNG 只会成倍变大
+                img.convert("RGB").save(buffer, format="JPEG", quality=92)
+            else:
+                img.save(buffer, format="PNG")
+            return buffer.getvalue()
+    except Exception:
+        # 图片能通过文件头校验但 Pillow 解不开时，交给模型自己判断
+        return image
+
+
 def _recognize_ollama(image: bytes) -> OcrResult:
     """调用本机 Ollama 的视觉模型做整页识别。"""
     # llama.cpp 的图片解码对 BMP 支持不稳定，本地路线只收 PNG / JPG；
     # 手机照片和截图几乎都是这两种。
-    validate_image(image, allowed={"png", "jpg"})
+    extension, _ = validate_image(image, allowed={"png", "jpg"})
+    image = _prepare_image(image, extension)
 
     model = config.OLLAMA_OCR_MODEL.strip() or "glm-ocr"
     prompt = config.OLLAMA_OCR_PROMPT.strip() or DEFAULT_OLLAMA_PROMPT
@@ -288,6 +339,9 @@ def _recognize_ollama(image: bytes) -> OcrResult:
         "stream": False,
         "options": {
             "temperature": 0,
+            # 不设 num_ctx 时 Ollama 用很小的默认上下文，整页图片会把窗口
+            # 占满，输出到第一两题就因 done_reason=length 被截断。
+            "num_ctx": config.OLLAMA_OCR_NUM_CTX,
             # GLM-OCR 默认输出上限偏小，整页多题时容易被截断
             "num_predict": 8192,
         },
@@ -335,7 +389,8 @@ def _recognize_ollama(image: bytes) -> OcrResult:
         raise OcrError("没有识别到文字，请换一张更清晰、方向端正的图片。")
     if data.get("done_reason") == "length":
         raise OcrError(
-            "识别结果超过模型输出上限，可能被截断。请把图片裁成单页或分成两张再试。"
+            "图片内容太多或分辨率过高，识别结果被截断。"
+            "请裁成单题/单页，或调大 OLLAMA_OCR_NUM_CTX 后重试。"
         )
 
     return OcrResult(text=text, mode=f"ollama:{model}")

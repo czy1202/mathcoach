@@ -98,10 +98,15 @@
       <div class="ocr-preview" id="ocr-preview" hidden>
         <div class="ocr-preview-head">
           <span class="ocr-preview-title">识别预览</span>
-          <span class="ocr-preview-tip">对照原图核对公式，可直接在上方输入框修改</span>
+          <span class="ocr-preview-tip">对照左侧原图核对公式，重点看根号指数、上标和阶乘范围</span>
           <button type="button" class="ocr-status-close" id="ocr-preview-close" aria-label="关闭识别预览">×</button>
         </div>
-        <div class="content ocr-preview-body" id="ocr-preview-body"></div>
+        <div class="ocr-preview-content">
+          <div class="ocr-image-wrap">
+            <img class="ocr-image" id="ocr-image" alt="上传的题目图片" hidden>
+          </div>
+          <div class="content ocr-preview-body" id="ocr-preview-body"></div>
+        </div>
       </div>
       <div class="ocr-status" id="ocr-status" hidden role="status" aria-live="polite">
         <span class="ocr-spinner" id="ocr-spinner" aria-hidden="true"></span>

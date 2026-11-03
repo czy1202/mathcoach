@@ -8,9 +8,11 @@
 
 import base64
 import hashlib
+import io
 
 import httpx
 import pytest
+from PIL import Image
 
 import config
 import ocr
@@ -41,6 +43,7 @@ def ollama_env(monkeypatch):
     monkeypatch.setattr(config, "OLLAMA_OCR_MODEL", "glm-ocr")
     monkeypatch.setattr(config, "OLLAMA_OCR_PROMPT", "")
     monkeypatch.setattr(config, "OLLAMA_OCR_TIMEOUT", 240.0)
+    monkeypatch.setattr(config, "OLLAMA_OCR_NUM_CTX", 16384)
     return config
 
 
@@ -351,7 +354,62 @@ def test_ollama_recognize_sends_image(ollama_env, monkeypatch):
     assert payload["prompt"] == "Text Recognition:"
     assert payload["stream"] is False
     assert payload["options"]["num_predict"] == 8192
+    # 不传 num_ctx 时整页图片会把 Ollama 默认上下文占满，输出被截断
+    assert payload["options"]["num_ctx"] == 16384
     assert base64.b64decode(payload["images"][0]) == PNG
+
+
+def test_ollama_custom_num_ctx(ollama_env, monkeypatch):
+    monkeypatch.setattr(config, "OLLAMA_OCR_NUM_CTX", 32768)
+    calls = install_post(monkeypatch, FakeResponse({"response": "题目"}))
+
+    ocr.recognize(PNG)
+
+    assert calls[0]["json"]["options"]["num_ctx"] == 32768
+
+
+def _image_bytes(size, fmt="PNG", exif=None):
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "white").save(buffer, format=fmt, exif=exif)
+    return buffer.getvalue()
+
+
+def _sent_image(calls):
+    return Image.open(io.BytesIO(
+        base64.b64decode(calls[0]["json"]["images"][0])
+    ))
+
+
+def test_ollama_upscales_small_crop(ollama_env, monkeypatch):
+    """单题小图放大到 2000px 宽，避免小符号被模型压没。"""
+    calls = install_post(monkeypatch, FakeResponse({"response": "题目"}))
+
+    ocr.recognize(_image_bytes((800, 200)))
+
+    sent = _sent_image(calls)
+    assert sent.size == (2000, 500)
+
+
+def test_ollama_keeps_whole_page_size(ollama_env, monkeypatch):
+    """整页面积超过放大上限，不应再放大。"""
+    data = _image_bytes((1654, 2339))
+    calls = install_post(monkeypatch, FakeResponse({"response": "题目"}))
+
+    ocr.recognize(data)
+
+    assert base64.b64decode(calls[0]["json"]["images"][0]) == data
+
+
+def test_ollama_applies_exif_orientation(ollama_env, monkeypatch):
+    """手机竖拍照片依赖 EXIF 方向；模型不会自己转正。"""
+    exif = Image.Exif()
+    exif[0x0112] = 6  # 顺时针转 90° 才是正方向
+    data = _image_bytes((2000, 1000), fmt="JPEG", exif=exif)
+    calls = install_post(monkeypatch, FakeResponse({"response": "题目"}))
+
+    ocr.recognize(data)
+
+    assert _sent_image(calls).size == (1000, 2000)
 
 
 def test_ollama_custom_prompt(ollama_env, monkeypatch):

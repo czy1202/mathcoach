@@ -54,7 +54,9 @@ python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 重解
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 376 个测试
+python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
+python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
+pytest                              # 380 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -86,7 +88,8 @@ ollama serve             # 或直接打开 Ollama 应用
 
 之后点击输入框左侧的图片按钮，或直接 `Ctrl+V` 粘贴截图即可。识别结果会先填进
 输入框并展开预览，**不会自动提交**；整页识别会把多道题放在同一段文本里，核对公式、
-删掉不需要的题再发送即可。服务端不主动保存图片、不写 trace。
+删掉不需要的题再发送即可。整页图里的细小根号/上标更容易认错，时间也明显更长；
+只问一道题时，先裁到题目范围再上传更稳。服务端不主动保存图片、不写 trace。
 
 如果更想用云端识别，可在 `.env` 里设 `OCR_PROVIDER=simpletex`，再填
 `SIMPLETEX_TOKEN`（用户中心生成的授权令牌），或同时填
@@ -109,9 +112,9 @@ ollama serve             # 或直接打开 Ollama 应用
   点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
   缓存的 `display_question`，不额外调用模型
 - 图片识题：上传或 `Ctrl+V` 粘贴截图（本地 GLM-OCR 支持 PNG / JPG；
-  云端 SimpleTex 额外支持 BMP），整页识别后填入输入框，并自动展开“识别预览”；
-  可对照原图核对、直接修改，删掉不需要的题目后再发送。识别中/成功/失败都有
-  状态提示
+  云端 SimpleTex 额外支持 BMP），识别后填入输入框，并展开“原图 + 识别文本”
+  并排预览；可对照原图修改，删掉不需要的题目后再发送。识别中禁止发送，状态条
+  右侧可取消；整页图会提示先裁到单题。识别中/成功/失败都有状态提示
 - 显示耗时、轮次、模型调用次数、工具调用次数、token 用量
 - 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
 - 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
@@ -464,6 +467,29 @@ Agent（注入 TraceRecorder）
    └─ 控制台报告 + trace_report 汇总
 ```
 
+### OCR 评测
+
+`eval/ocr_eval.py` 把 2024 / 2025 真题 PDF 按题号裁成单题图，或直接整页渲染，
+再调用本地 OCR，输出 `results.jsonl`、逐题裁剪图和联系表。CJK CER / 数字 F1 /
+符号召回只能提示漏字和漏符号，公式是否等价必须对照 `crops/` 人工核对。
+
+最近一次结果（`glm-ocr:latest`，200 DPI）：
+
+| 输入 | 题数 | 清晰渲染 | 手机轻度退化 | 手机强退化 |
+| --- | --- | --- | --- | --- |
+| 单题裁剪 | 34 | 34/34（100%） | 33/34（97.1%） | 32/34（94.1%） |
+| 整页 | 28 | 27/28（96.4%） | 27/28（96.4%） | 26/28（92.9%） |
+
+已知错误集中在细小根号和上标：2025 年第 1 道选择题的 `e^{∛x}` 会被读成
+`e^{√x}` 或 `e^{3√x}`，单题图放大到 2000px 宽后可以恢复，整页图受模型内部
+视觉分辨率限制，继续提高整页 DPI 没有效果。手机退化下 2025-F3 的 `2t^{2}`
+会丢成 `2t^{-2}` 或 `∠t`；强退化下 2024-F1 会把 `\sqrt[n]{n!}` 读成
+`\sqrt[n]{n}!`（阶乘跑到根号外）。这类错误只能靠人工核对。
+
+整页识别曾因 Ollama 默认上下文窗口过小，输出在第一两题就被截断
+（`done_reason=length`）；现在固定传 `OLLAMA_OCR_NUM_CTX=16384`。评测产物在
+`eval/ocr_results/`，已 gitignore。
+
 ## 目录结构
 
 ```text
@@ -505,6 +531,7 @@ mathcoach/
 │   ├── extract.py      # 从回答里提取"最终答案："
 │   ├── verify.py       # 独立复核器（--verify）：新上下文复核 + 反馈重解
 │   ├── run_eval.py     # 跑批、自检、报告
+│   ├── ocr_eval.py     # OCR 评测：真题裁单题 / 整页 + 手机退化三档
 │   └── trace_report.py # 轨迹汇总
 ├── test_agent.py
 ├── test_ask.py

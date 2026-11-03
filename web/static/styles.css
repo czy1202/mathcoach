@@ -1148,12 +1148,49 @@ textarea {
   white-space: nowrap;
 }
 
+.ocr-preview-content {
+  display: grid;
+  grid-template-columns: minmax(150px, 36%) 1fr;
+}
+
+.ocr-image-wrap {
+  padding: 10px;
+  border-right: 1px solid var(--line);
+  background: #f6f7fb;
+}
+
+.ocr-image {
+  display: block;
+  width: 100%;
+  max-height: 240px;
+  border-radius: 8px;
+  background: #fff;
+  object-fit: contain;
+}
+
 .ocr-preview-body {
   max-height: 240px;
   padding: 10px 14px;
   overflow: auto;
   font-size: 0.88rem;
   line-height: 1.7;
+}
+
+.ocr-preview-wait {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 640px) {
+  .ocr-preview-content {
+    grid-template-columns: 1fr;
+  }
+
+  .ocr-image-wrap {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
 }
 
 /* 图片识别状态条：识别中 / 成功 / 失败 */

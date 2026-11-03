@@ -40,6 +40,15 @@ OLLAMA_OCR_MODEL: str = (
 OLLAMA_OCR_PROMPT: str = os.getenv("OLLAMA_OCR_PROMPT", "").strip()
 _ollama_timeout = os.getenv("OLLAMA_OCR_TIMEOUT", "").strip()
 OLLAMA_OCR_TIMEOUT: float = float(_ollama_timeout) if _ollama_timeout else 240.0
+# Ollama 默认上下文窗口很小，整页图片会把上下文占满，导致输出刚开头就被
+# 截断（done_reason=length）。16384 对 A4 整页和手机照片实测足够。
+_ollama_ctx = os.getenv("OLLAMA_OCR_NUM_CTX", "").strip()
+try:
+    OLLAMA_OCR_NUM_CTX: int = int(_ollama_ctx) if _ollama_ctx else 16384
+except ValueError:
+    OLLAMA_OCR_NUM_CTX = 16384
+if OLLAMA_OCR_NUM_CTX <= 0:
+    OLLAMA_OCR_NUM_CTX = 16384
 
 # 图片识别（SimpleTex）。两种鉴权方式任选其一：
 # 1. SIMPLETEX_TOKEN：用户中心生成的授权令牌（AT 开头），本地自用最省事；
