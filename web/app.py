@@ -18,12 +18,13 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import config
+import ocr
 from agent import Agent
 from eval.extract import extract_final_answer
 from llm import OpenAIClient
@@ -67,6 +68,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 _client = None
 _client_lock = threading.Lock()
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
+# 图片识别另算：它不占模型并发额度，但连续点击会重复消耗 OCR 额度。
+_ocr_lock = threading.Lock()
 SESSIONS = SessionStore()
 
 # 步骤追问有自己独立的短对话，绝不能写进主会话，否则主对话会出现
@@ -136,6 +139,14 @@ class AskRequest(BaseModel):
         max_length=64,
         description="服务端返回的会话 id；首次提问不传",
     )
+
+
+class OcrResponse(BaseModel):
+    """一次整页图片识别的结果；只返回文本，不自动提交解题。"""
+
+    text: str
+    mode: str = ""
+    confidence: float | None = None
 
 
 class StepAskRequest(BaseModel):
@@ -645,9 +656,77 @@ def health() -> dict:
         "ok": True,
         "model": config.OPENAI_MODEL,
         "key_set": bool(config.OPENAI_API_KEY.strip()),
+        "ocr_configured": ocr.is_configured(),
+        "ocr_provider": ocr.get_provider(),
         "papers_available": index_available(),
         **retriever_status(),
     }
+
+
+@app.post("/api/ocr", response_model=OcrResponse)
+def recognize_image(file: UploadFile = File(...)) -> OcrResponse:
+    """把题目截图识别成可编辑文本。
+
+    只做识别，不调用解题模型，也不自动提交。识别结果由前端填进输入框，
+    用户核对公式和题号后再自己点发送。
+    """
+    if not ocr.is_configured():
+        provider = ocr.get_provider()
+        if provider == "simpletex":
+            detail = (
+                "服务端未配置图片识别：请在 .env 中填写 SIMPLETEX_TOKEN，"
+                "或同时填写 SIMPLETEX_APP_ID 与 SIMPLETEX_APP_SECRET，"
+                "然后重启服务。"
+            )
+        else:
+            detail = (
+                f"服务端图片识别配置无效（OCR_PROVIDER={provider!r}），"
+                "可选 ollama / simpletex。"
+            )
+        raise HTTPException(status_code=503, detail=detail)
+
+    # 多读 1 字节即可判断是否超限，避免把超大文件整个读进内存
+    data = file.file.read(ocr.MAX_IMAGE_BYTES + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="图片内容为空，请重新选择。")
+    if len(data) > ocr.MAX_IMAGE_BYTES:
+        limit_mb = ocr.MAX_IMAGE_BYTES // (1024 * 1024)
+        raise HTTPException(
+            status_code=413,
+            detail=f"图片超过 {limit_mb} MB，请压缩或裁剪后再上传。",
+        )
+    detected = ocr.detect_image_type(data)
+    if detected is None:
+        raise HTTPException(
+            status_code=415,
+            detail="只支持 PNG / JPG / BMP 图片，请换一种格式。",
+        )
+    # 本地 llama.cpp 路线只解码 PNG / JPG，BMP 在进模型前就拒绝，
+    # 否则会变成一条含糊的 502。
+    if ocr.get_provider() == "ollama" and detected[0] not in {"png", "jpg"}:
+        raise HTTPException(
+            status_code=415,
+            detail="本地识别只支持 PNG / JPG 图片，请换一种格式。",
+        )
+
+    if not _ocr_lock.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail="已有一张图片正在识别，请稍等几秒再试。",
+        )
+    try:
+        result = ocr.recognize(data)
+    except ocr.OcrError as exc:
+        # 上游失败统一按 502 返回；具体原因可以直接展示给用户
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    finally:
+        _ocr_lock.release()
+
+    return OcrResponse(
+        text=result.text,
+        mode=result.mode,
+        confidence=result.confidence,
+    )
 
 
 @app.get("/api/papers", response_model=PaperIndexResponse)

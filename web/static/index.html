@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>mathcoach · 数学竞赛解题助手</title>
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="/static/styles.css?v=20261104">
+  <link rel="stylesheet" href="/static/styles.css?v=20261102">
 </head>
 <body>
   <div class="page">
@@ -67,7 +67,7 @@
           <button type="button" data-q="已知 a_{n+1}=2a_n+1，求通项公式">缺条件题：<span>递推数列</span></button>
           <button type="button" data-q="第七届全国大学生数学竞赛非数学类初赛压轴题">按届找题：<span>第七届初赛压轴题</span></button>
         </div>
-        <p class="welcome-note">本地演示 · 回答由 AI 生成 · 关键计算已交给工具验证</p>
+        <p class="welcome-note">支持上传或粘贴题目截图 · 回答由 AI 生成 · 关键计算已交给工具验证</p>
       </section>
     </main>
 
@@ -95,7 +95,34 @@
     </section>
 
     <footer class="composer" hidden>
+      <div class="ocr-preview" id="ocr-preview" hidden>
+        <div class="ocr-preview-head">
+          <span class="ocr-preview-title">识别预览</span>
+          <span class="ocr-preview-tip">对照原图核对公式，可直接在上方输入框修改</span>
+          <button type="button" class="ocr-status-close" id="ocr-preview-close" aria-label="关闭识别预览">×</button>
+        </div>
+        <div class="content ocr-preview-body" id="ocr-preview-body"></div>
+      </div>
+      <div class="ocr-status" id="ocr-status" hidden role="status" aria-live="polite">
+        <span class="ocr-spinner" id="ocr-spinner" aria-hidden="true"></span>
+        <span class="ocr-status-text" id="ocr-status-text"></span>
+        <button type="button" class="ocr-status-close" id="ocr-status-close" aria-label="关闭识别提示">×</button>
+      </div>
       <form id="form" autocomplete="off">
+        <button
+          type="button"
+          id="ocr-btn"
+          class="ocr-btn"
+          title="上传题目图片（也可以直接 Ctrl+V 粘贴截图）"
+          aria-label="上传题目图片"
+        >
+          <svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="3"></rect>
+            <circle cx="8.5" cy="8.5" r="1.6"></circle>
+            <path d="M21 15.5 16 10.5 5 21.5"></path>
+          </svg>
+        </button>
+        <input type="file" id="ocr-file" accept="image/png,image/jpeg,image/bmp" hidden>
         <textarea
           id="question"
           rows="1"
@@ -108,7 +135,7 @@
           <span class="send-label">发送</span>
         </button>
       </form>
-      <p class="hint">Enter 发送 · Shift + Enter 换行 · 回答仅供学习参考</p>
+      <p class="hint">Enter 发送 · Shift + Enter 换行 · 图片识别结果请先核对再发送</p>
     </footer>
   </div>
 
@@ -141,6 +168,6 @@
   <script src="/static/vendor/katex/katex.min.js"></script>
   <script src="/static/vendor/marked/marked.umd.js"></script>
   <script src="/static/vendor/dompurify/purify.min.js"></script>
-  <script src="/static/app.js?v=20261104"></script>
+  <script src="/static/app.js?v=20261102"></script>
 </body>
 </html>

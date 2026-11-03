@@ -8,7 +8,8 @@
 
 ## 项目规格
 
-- 输入：文字题目（自然语言或 LaTeX）
+- 输入：文字题目（自然语言或 LaTeX）；Web 版可选上传/粘贴题目截图，
+  经本地 GLM-OCR（Ollama，免费）整页识别成可编辑文本后再解题
 - 输出：
   1. 涉及的知识点
   2. 解题思路
@@ -21,7 +22,7 @@
   不引入假设硬答
 - 成功标准：2024、2025 两年 CMC 真题共 34 题（每年 6 填空 + 6 选择 +
   5 解答），总通过率 ≥ 70%
-- 暂不实现：拍照识题、cross-encoder rerank
+- 暂不实现：cross-encoder rerank、手写公式的专项识别优化
 
 ## 快速开始
 
@@ -34,6 +35,10 @@ pip install -r requirements.txt
 # 配置模型：.env 已被 .gitignore 忽略，不要提交
 copy .env.example .env
 # 填入 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+
+# 可选：本地图片识题（免费）
+ollama pull glm-ocr                         # 约 2.7 GB，只需下载一次
+ollama serve                                # 或直接打开 Ollama 应用
 
 python ask.py "计算 lim(x→0) sin x / x"   # 真实模型一问一答
 python ask.py                              # 连续提问模式，exit 退出
@@ -49,7 +54,7 @@ python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 重解
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
-pytest                              # 330 个测试
+pytest                              # 376 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -72,6 +77,22 @@ python -m web.app
 只监听 `127.0.0.1`，不需要登录；API Key 留在服务端 `.env`，浏览器拿不到。
 同一时间最多处理 2 道题，超过会直接返回 429，避免本地演示时并发消耗额度。
 
+图片识题默认走本机 Ollama，免费、无需 API Key，图片不会离开本机：
+
+```bash
+ollama pull glm-ocr      # 约 2.7 GB，只需下载一次
+ollama serve             # 或直接打开 Ollama 应用
+```
+
+之后点击输入框左侧的图片按钮，或直接 `Ctrl+V` 粘贴截图即可。识别结果会先填进
+输入框并展开预览，**不会自动提交**；整页识别会把多道题放在同一段文本里，核对公式、
+删掉不需要的题再发送即可。服务端不主动保存图片、不写 trace。
+
+如果更想用云端识别，可在 `.env` 里设 `OCR_PROVIDER=simpletex`，再填
+`SIMPLETEX_TOKEN`（用户中心生成的授权令牌），或同时填
+`SIMPLETEX_APP_ID` + `SIMPLETEX_APP_SECRET`。注意 SimpleTex 会收到图片，
+并按账户额度计费。
+
 页面能力：
 
 - 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
@@ -87,6 +108,10 @@ python -m web.app
 - 真题模式：左侧列出第 1–16 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
   点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
   缓存的 `display_question`，不额外调用模型
+- 图片识题：上传或 `Ctrl+V` 粘贴截图（本地 GLM-OCR 支持 PNG / JPG；
+  云端 SimpleTex 额外支持 BMP），整页识别后填入输入框，并自动展开“识别预览”；
+  可对照原图核对、直接修改，删掉不需要的题目后再发送。识别中/成功/失败都有
+  状态提示
 - 显示耗时、轮次、模型调用次数、工具调用次数、token 用量
 - 可展开的解题轨迹：每一步模型调用的耗时，以及每次工具调用的参数和结果
 - 每次提问写一条 `traces/web-*.jsonl`，和评测轨迹使用同一套格式
@@ -109,6 +134,10 @@ python -m web.app
   `{question, parent_session_id, parent_turn_id?, parent_turn?, step_index,
   step_text?, step_session_id?}`；响应只包含这一步的短回答和独立的
   `step_session_id`，不会修改主会话
+- `POST /api/ocr`：`multipart/form-data`，字段名 `file`。只做识别，不调用解题
+  模型、不创建会话；返回 `{text, mode, confidence?}`，前端填入输入框后由用户
+  核对并手动发送。SimpleTex 未配置或 `OCR_PROVIDER` 无效返回 503，
+  格式/大小/上游失败分别返回 415 / 413 / 502
 - `DELETE /api/session/{session_id}`：结束会话，"新对话"按钮会调用
 - `GET /api/papers`：第 1–16 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
 - `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
@@ -448,6 +477,7 @@ mathcoach/
 ├── tracing.py          # TraceRecorder：逐题写 JSONL
 ├── schemas.py          # Verdict 等数据结构
 ├── config.py           # 读取 .env
+├── ocr.py              # 图片识题：本地 Ollama / GLM-OCR（默认）+ SimpleTex 备选
 ├── rag/
 │   ├── build.py        # PDF -> JSONL 构建入口
 │   ├── papers.py       # 试卷版式解析、去重
@@ -463,9 +493,10 @@ mathcoach/
 │   └── search.py       # 命令行检索
 ├── data/               # 题库产物 problems.jsonl / question_latex.json（已 gitignore）
 ├── web/
-│   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-step、/api/papers、/api/paper
+│   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-step、/api/ocr、/api/papers
 │   ├── sessions.py     # 内存会话、TTL、上下文裁剪
 │   ├── test_app.py
+│   ├── test_ocr.py     # /api/ocr：配置、格式、大小、失败映射、并发保护
 │   ├── test_sessions.py
 │   └── static/         # 单页前端；KaTeX / marked / DOMPurify 本地化
 ├── eval/
@@ -477,6 +508,7 @@ mathcoach/
 │   └── trace_report.py # 轨迹汇总
 ├── test_agent.py
 ├── test_ask.py
+├── test_ocr.py         # 本地 Ollama / SimpleTex：鉴权、图片格式、响应解析与错误处理
 ├── test_rag.py
 ├── test_solution.py    # 分步解答解析（标题、代码块、乱序编号）
 ├── test_vector.py      # 向量索引、RRF、工具回退
@@ -486,7 +518,10 @@ mathcoach/
 
 ## 已知限制
 
-- 只支持文字输入；拍照 / 相册识题尚未实现。
+- 图片识题默认依赖本机 Ollama + GLM-OCR（约 2.7 GB）：需要机器有足够内存/显存，
+  首次调用要加载模型会明显变慢；手写体、低分辨率或复杂排版的识别仍可能出错，
+  结果必须人工核对。本地路线只支持 PNG / JPG，单张上限 10 MB；
+  整页识别暂不自动切分题目。切到 SimpleTex 时图片会发送到外部服务并按额度计费。
 - `sympy.parse_expr` 最终会执行字符串表达式。目前只处理本地评测集和模型
   输出；接入真实用户输入前，需要换成受限命名空间或独立的沙箱解析。
 - 拒答识别仍是关键词匹配，措辞变化可能误判。后续计划换成 LLM-as-judge，
@@ -515,4 +550,4 @@ mathcoach/
 3. 在冻结的留出集上验证 RRF 收益；针对 h01 这类失败样本尝试 cross-encoder
    rerank 或 query-adaptive 融合，并重新设计或移除基本无效的标签加权。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
-5. 完善 Web 版：流式输出、图片输入，以及带登录和限流后的公网部署。
+5. 完善 Web 版：流式输出、整页识别后的自动题目切分，以及带登录和限流后的公网部署。
