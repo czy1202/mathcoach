@@ -375,9 +375,71 @@ textarea {
   background: linear-gradient(145deg, #5b54e8, #4f46e5);
   color: #fff;
   line-height: 1.7;
-  white-space: pre-wrap;
+  white-space: normal;
   overflow-wrap: anywhere;
   box-shadow: 0 10px 24px rgba(79, 70, 229, 0.18);
+}
+
+/* 用户消息现在走 Markdown/KaTeX，必须把默认的深色文字改成白色。 */
+.message.user .bubble .content {
+  color: #fff;
+  font-size: 0.95rem;
+  line-height: 1.7;
+}
+
+.message.user .bubble .content p {
+  margin: 0.35em 0;
+}
+
+.message.user .bubble .content strong,
+.message.user .bubble .content a {
+  color: #fff;
+}
+
+.message.user .bubble .content a {
+  text-decoration: underline;
+}
+
+.message.user .bubble .content code {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.message.user .bubble .content pre {
+  border-color: rgba(255, 255, 255, 0.22);
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.message.user .bubble .content pre code {
+  color: #fff;
+}
+
+.message.user .bubble .content blockquote {
+  border-left-color: rgba(255, 255, 255, 0.5);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.message.user .bubble .katex {
+  color: #fff;
+}
+
+.message.user .bubble .katex-display {
+  margin: 0.55em 0;
+}
+
+.message.user .bubble .math-fallback {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+.message.user .bubble .content table th,
+.message.user .bubble .content table td {
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.message.user .bubble .content table th {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .avatar {
@@ -1127,7 +1189,8 @@ textarea {
 .ocr-preview-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   padding: 7px 12px;
   border-bottom: 1px solid var(--line);
   background: #fafbff;
@@ -1143,14 +1206,59 @@ textarea {
 
 .ocr-preview-tip {
   flex: 1;
+  min-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.ocr-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.ocr-tool-btn {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.ocr-tool-btn:hover:not(:disabled) {
+  border-color: #c7d2fe;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
+.ocr-tool-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .ocr-preview-content {
   display: grid;
   grid-template-columns: minmax(150px, 36%) 1fr;
+}
+
+.ocr-preview.no-image .ocr-preview-content {
+  grid-template-columns: 1fr;
+}
+
+.ocr-preview.no-image .ocr-image-wrap {
+  display: none;
+}
+
+.ocr-preview-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
 }
 
 .ocr-image-wrap {
@@ -1168,6 +1276,10 @@ textarea {
   object-fit: contain;
 }
 
+.ocr-image[hidden] {
+  display: none;
+}
+
 .ocr-preview-body {
   max-height: 240px;
   padding: 10px 14px;
@@ -1182,6 +1294,105 @@ textarea {
   font-size: 0.8rem;
 }
 
+/* 题目卡里的公式本身就是编辑入口：虚线提示可点，点开后只改这一个公式。 */
+.ocr-draft-formula {
+  display: inline;
+  margin: 0;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 1px dashed rgba(79, 70, 229, 0.3);
+  border-radius: 3px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.ocr-draft-formula:hover,
+.ocr-draft-formula:focus-visible {
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+  outline: none;
+}
+
+.ocr-draft-formula.is-display {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0.55em 0;
+  padding: 5px 8px;
+  border: 1px dashed rgba(79, 70, 229, 0.26);
+  border-radius: 8px;
+  overflow-x: auto;
+}
+
+.ocr-draft-formula .katex-display {
+  margin: 0;
+}
+
+.ocr-draft-formula.is-display .katex-display {
+  text-align: left;
+}
+
+.ocr-source-editor {
+  margin: 10px 14px;
+}
+
+.ocr-source-editor[hidden] {
+  display: none;
+}
+
+.ocr-source-editor textarea {
+  width: 100%;
+  min-height: 130px;
+  padding: 10px 12px;
+  border: 1px solid #dfe2ee;
+  border-radius: 10px;
+  background: #fbfcff;
+  color: var(--ink);
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  font-size: 0.82rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.ocr-source-editor textarea:focus {
+  border-color: #b9c1f7;
+  outline: none;
+}
+
+.ocr-source-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.ocr-source-hint {
+  flex: 1;
+  min-width: 170px;
+  color: var(--soft);
+  font-size: 0.72rem;
+}
+
+.ocr-source-save {
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.72rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ocr-source-save:hover {
+  background: var(--accent-deep);
+}
+
 @media (max-width: 640px) {
   .ocr-preview-content {
     grid-template-columns: 1fr;
@@ -1190,6 +1401,15 @@ textarea {
   .ocr-image-wrap {
     border-right: 0;
     border-bottom: 1px solid var(--line);
+  }
+
+  .ocr-preview-tip {
+    order: 3;
+    flex-basis: 100%;
+  }
+
+  .ocr-preview-actions {
+    margin-left: auto;
   }
 }
 
@@ -1756,6 +1976,170 @@ textarea {
 
   body.step-panel-open .page {
     width: calc(100% - 440px);
+  }
+}
+
+/* ---------- 公式编辑器 ---------- */
+
+body.formula-panel-open {
+  overflow: hidden;
+}
+
+.formula-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  background: rgba(23, 32, 51, 0.32);
+  backdrop-filter: blur(2px);
+}
+
+.formula-backdrop[hidden] {
+  display: none;
+}
+
+.formula-panel {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  z-index: 71;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: min(560px, calc(100vw - 28px));
+  max-height: calc(100vh - 40px);
+  padding: 18px 20px 16px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--panel);
+  box-shadow: 0 28px 80px rgba(23, 32, 51, 0.2);
+  transform: translate(-50%, -50%);
+}
+
+.formula-panel[hidden] {
+  display: none;
+}
+
+.formula-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.formula-head .eyebrow {
+  margin: 0 0 4px;
+}
+
+.formula-head h2 {
+  margin: 0;
+  font-size: 1.03rem;
+  line-height: 1.4;
+}
+
+.formula-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 58px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid #dfe3f5;
+  border-radius: 12px;
+  background: #f8f9ff;
+  font-size: 1.05rem;
+}
+
+.formula-preview.is-empty {
+  justify-content: flex-start;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.formula-preview .katex-display {
+  margin: 0;
+}
+
+.formula-label {
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+#formula-input {
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid #dfe2ee;
+  border-radius: 10px;
+  background: #fbfcff;
+  color: var(--ink);
+  font-family: "Cascadia Code", Consolas, "SFMono-Regular", monospace;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+#formula-input:focus {
+  border-color: #b9c1f7;
+  outline: none;
+}
+
+.formula-symbols {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.formula-symbol-btn {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.formula-symbol-btn:hover {
+  border-color: #c7d2fe;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
+.formula-hint {
+  margin: 0;
+  color: var(--soft);
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+.formula-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.formula-save {
+  padding: 7px 14px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.78rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.formula-save:hover {
+  background: var(--accent-deep);
+}
+
+@media (max-width: 640px) {
+  .formula-panel {
+    width: calc(100vw - 20px);
+    max-height: calc(100vh - 24px);
+    padding: 15px;
   }
 }
 
