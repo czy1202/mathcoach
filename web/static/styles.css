@@ -837,6 +837,16 @@ textarea {
   line-height: 1.6;
 }
 
+.notice-box {
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #f7f8fb;
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
 .fallback {
   margin: 0;
   white-space: pre-wrap;
@@ -1742,6 +1752,29 @@ textarea {
 #send:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.stop-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 9px 12px;
+  border: 1px solid #e7b8b8;
+  border-radius: 12px;
+  background: #fff6f6;
+  color: #b42318;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.stop-btn:hover {
+  background: #ffecec;
+}
+
+.stop-btn[hidden] {
+  display: none;
 }
 
 .send-arrow {

@@ -109,6 +109,51 @@ def test_clean_latex_moves_period_out_of_math():
     assert clean_latex(r"正文 $x$，结束。") == "正文 $x$，结束。"
 
 
+def test_clean_latex_wraps_bare_fill_in_blank():
+    """模型常把填空题横线写在 $...$ 外面，不能直接露给用户。"""
+    assert (
+        clean_latex(r"切线方程为 \underline{\qquad\qquad}。")
+        == r"切线方程为 $\underline{\qquad\qquad}$。"
+    )
+    assert (
+        clean_latex(r"整数部分为 \_\_\_\_\_\_ 。")
+        == r"整数部分为 $\underline{\qquad\qquad}$ 。"
+    )
+    assert clean_latex(r"已知 $x$，求 \frac{1}{2}。") == r"已知 $x$，求 $\frac{1}{2}$。"
+
+
+def test_clean_latex_restores_literal_newlines():
+    assert clean_latex(r"第一行\n第二行") == "第一行\n第二行"
+    assert clean_latex(r"求 $x$。\n（1）证明结论。") == "求 $x$。\n（1）证明结论。"
+
+
+def test_clean_latex_leaves_formulas_untouched():
+    source = r"设 $f(x)=\frac{1}{2}$，求 $\sqrt{x}$。"
+    assert clean_latex(source) == source
+
+
+def test_cached_latex_has_no_bare_backslash_commands():
+    """回归：题库缓存里所有公式命令都必须在分隔符内。"""
+    import re
+    from pathlib import Path
+
+    path = Path("data/processed/question_latex.json")
+    if not path.exists():
+        pytest.skip("题库 LaTeX 缓存不存在")
+
+    entries = json.loads(path.read_text(encoding="utf-8"))
+    for problem_id, entry in entries.items():
+        latex = clean_latex(entry.get("latex", ""))
+        parts = re.split(
+            r"(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))",
+            latex,
+        )
+        for index, segment in enumerate(parts):
+            if index % 2:
+                continue
+            assert "\\" not in segment, f"{problem_id} 仍有公式源码：{segment!r}"
+
+
 # ---------- 构建 ----------
 
 class FakeLatexClient:

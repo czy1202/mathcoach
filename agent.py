@@ -8,6 +8,7 @@
 """
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
@@ -22,6 +23,8 @@ MAX_STEPS = 15          # 单次求解最多问模型 15 轮，防止无限循�
                         # 34 道真题实测最长 14 轮（2025-F6、2025-F1）；
                         # 放到 25 轮没有多通过一题，只是更慢。
 STEP_TIMEOUT = 30.0     # 单轮模型调用的超时时间（秒）
+
+CANCELLED_MESSAGE = "已停止生成。"
 
 SYSTEM_PROMPT = r"""你是一名数学竞赛解题助手，请按下面的规则回答：
 
@@ -159,6 +162,7 @@ class Agent:
         user_input: str,
         trace=None,
         history: list[dict] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> str:
         """求解一道题，或基于历史回答一次追问。
 
@@ -168,6 +172,10 @@ class Agent:
                    Agent 不依赖具体实现，不传时完全不影响原有行为。
             history: 之前的问答消息，只应包含 user / assistant 的最终文本，
                      不包含工具调用记录。为空时行为和单轮求解完全一致。
+            cancel_event: 可选的取消信号。网页端在用户点“停止”后置位；
+                          Agent 会在每次模型调用/工具调用之间检查，避免
+                         继续消耗后续步骤。已经发出的单次请求无法中途
+                         打断，但最多只多等这一次调用。
 
         Returns:
             str: 模型的最终文字答案；触发护栏时返回明确的错误提示。
@@ -195,6 +203,9 @@ class Agent:
         ]
 
         for step in range(1, self.max_steps + 1):
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled(trace, step)
+
             chat_start = time.perf_counter()
             # 网络抖动导致的单次超时很常见，重试一次即可恢复；
             # 连续两次超时才判定该题失败，避免白白丢掉一道能做对的题。
@@ -243,6 +254,11 @@ class Agent:
                 usage=self._usage_dict(resp),
             )
 
+            # 用户在等模型返回期间点了“停止”：这次请求已经产生费用，
+            # 但不要再执行工具或进入下一轮。
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled(trace, step)
+
             # 没有工具调用，说明模型这次是在"说话"，也就是最终答案
             if not resp.tool_calls:
                 if not resp.content.strip():
@@ -288,6 +304,8 @@ class Agent:
             })
 
             for call, call_id in zip(resp.tool_calls, call_ids):
+                if cancel_event is not None and cancel_event.is_set():
+                    return self._cancelled(trace, step)
                 if self.verbose:
                     print(f"  → 调用 {call.name}，参数：{call.args}")
                 tool_start = time.perf_counter()
@@ -323,6 +341,17 @@ class Agent:
         )
         self._emit(trace, "error", step=self.max_steps, kind="max_steps", message=message)
         return message
+
+    @classmethod
+    def _cancelled(cls, trace, step: int) -> str:
+        """记录取消事件并返回统一提示，避免网页把半截过程当成答案。"""
+        cls._emit(
+            trace,
+            "cancelled",
+            step=step,
+            message=CANCELLED_MESSAGE,
+        )
+        return CANCELLED_MESSAGE
 
     @staticmethod
     def _emit(trace, event_type: str, **fields) -> None:

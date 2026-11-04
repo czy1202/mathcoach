@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field
 
 import config
 import ocr
-from agent import Agent
-from eval.extract import extract_final_answer
+from agent import CANCELLED_MESSAGE, Agent
+from eval.extract import extract_final_answer, extract_final_answer_display
 from llm import OpenAIClient
 from rag.latex import LatexStore
 from solution import extract_solution_steps
@@ -101,6 +101,50 @@ _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 _ocr_lock = threading.Lock()
 SESSIONS = SessionStore()
 
+# 网页端“停止生成”：浏览器先中断自己的等待，再按 request_id 置位这里的事件。
+# 已经发出的单次模型调用无法从另一个线程强杀，但 Agent 会在下一次调用前
+# 看到信号并停止，不会继续执行工具和后续步骤。
+_CANCEL_LOCK = threading.Lock()
+_CANCEL_EVENTS: dict[str, tuple[float, threading.Event]] = {}
+_CANCEL_TTL = 300.0
+
+
+def register_cancel(request_id: str | None) -> threading.Event | None:
+    """为一次请求登记取消信号；request_id 为空时返回 None。"""
+    if not request_id:
+        return None
+    now = time.monotonic()
+    with _CANCEL_LOCK:
+        expired = [
+            key for key, (created, _) in _CANCEL_EVENTS.items()
+            if now - created > _CANCEL_TTL
+        ]
+        for key in expired:
+            _CANCEL_EVENTS.pop(key, None)
+        event = threading.Event()
+        _CANCEL_EVENTS[request_id] = (now, event)
+        return event
+
+
+def drop_cancel(request_id: str | None, event: threading.Event | None) -> None:
+    """请求结束后清掉登记，避免取消表随会话无限增长。"""
+    if not request_id or event is None:
+        return
+    with _CANCEL_LOCK:
+        current = _CANCEL_EVENTS.get(request_id)
+        if current is not None and current[1] is event:
+            _CANCEL_EVENTS.pop(request_id, None)
+
+
+def request_cancel(request_id: str) -> bool:
+    """置位某个请求的取消信号；请求不存在（已结束）时返回 False。"""
+    with _CANCEL_LOCK:
+        current = _CANCEL_EVENTS.get(request_id)
+        if current is None:
+            return False
+        current[1].set()
+        return True
+
 # 步骤追问有自己独立的短对话，绝不能写进主会话，否则主对话会出现
 # “用户问：这一步为什么”这种没有上下文的孤立消息。
 STEP_SESSIONS = SessionStore(
@@ -168,6 +212,18 @@ class AskRequest(BaseModel):
         max_length=64,
         description="服务端返回的会话 id；首次提问不传",
     )
+    request_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="客户端生成的一次性请求 id，用于“停止生成”",
+    )
+
+
+class CancelRequest(BaseModel):
+    """取消一次正在进行的求解请求。"""
+
+    request_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class OcrResponse(BaseModel):
@@ -201,6 +257,11 @@ class StepAskRequest(BaseModel):
     step_index: int = Field(..., ge=1)
     step_text: str = Field(default="", max_length=20000)
     step_session_id: str | None = Field(default=None, max_length=64)
+    request_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class StepInfo(BaseModel):
@@ -311,6 +372,7 @@ class AskResponse(BaseModel):
     turn: int = 1
     follow_up: bool = False
     final_answer: str | None = None
+    final_answer_display: str | None = None
     error: str | None = None
     elapsed: float = 0.0
     llm_calls: int = 0
@@ -881,6 +943,12 @@ def get_paper(
     return payload
 
 
+@app.post("/api/ask/cancel")
+def cancel_ask(req: CancelRequest) -> dict:
+    """停止一次仍在排队的求解；已经结束时返回 cancelled=False。"""
+    return {"cancelled": request_cancel(req.request_id)}
+
+
 @app.post("/api/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     """求解一道题，或在已有会话里追问。"""
@@ -897,6 +965,7 @@ def ask(req: AskRequest) -> AskResponse:
     if not _slots.acquire(timeout=0.5):
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
+    cancel_event = register_cancel(req.request_id)
     try:
         session = SESSIONS.get_or_create(req.session_id)
 
@@ -928,11 +997,15 @@ def ask(req: AskRequest) -> AskResponse:
                     question,
                     trace=tracer,
                     history=history,
+                    cancel_event=cancel_event,
                 )
             except Exception as e:  # 单题失败不拖垮服务
                 answer = f"错误：求解失败（{type(e).__name__}: {e}）"
                 tracer.add("error", kind="agent_exception", message=answer)
             elapsed = time.perf_counter() - start
+            cancelled = cancel_event is not None and cancel_event.is_set()
+            if cancelled:
+                answer = CANCELLED_MESSAGE
 
             tracer.finish(
                 request_elapsed=round(elapsed, 4),
@@ -944,17 +1017,26 @@ def ask(req: AskRequest) -> AskResponse:
             )
 
             # 列真题不是解题，不要把正文里的数字误当成最终答案
-            paper = collect_paper(tracer.events) if retrieval else None
+            paper = None if cancelled else (
+                collect_paper(tracer.events) if retrieval else None
+            )
+            allow_answer_fallback = (
+                not follow_up
+                and paper is None
+                and not asks_for_more_info(answer)
+            )
             final_answer = extract_final_answer(
                 answer,
-                allow_fallback=(
-                    not follow_up
-                    and paper is None
-                    and not asks_for_more_info(answer)
-                ),
+                allow_fallback=allow_answer_fallback,
+            )
+            final_answer_display = extract_final_answer_display(
+                normalize_math_delimiters(answer),
+                allow_fallback=allow_answer_fallback,
             )
             error = tracer.error
-            if error is None and answer.startswith("错误："):
+            if cancelled:
+                error = CANCELLED_MESSAGE
+            elif error is None and answer.startswith("错误："):
                 error = answer
 
             display_answer = strip_answer_marker(
@@ -974,6 +1056,7 @@ def ask(req: AskRequest) -> AskResponse:
                 turn=turn,
                 follow_up=follow_up,
                 final_answer=final_answer,
+                final_answer_display=final_answer_display,
                 error=error,
                 elapsed=round(elapsed, 2),
                 llm_calls=tracer.llm_calls,
@@ -995,6 +1078,7 @@ def ask(req: AskRequest) -> AskResponse:
         finally:
             session.lock.release()
     finally:
+        drop_cancel(req.request_id, cancel_event)
         _slots.release()
 
 
@@ -1017,6 +1101,7 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
     if not _slots.acquire(timeout=0.5):
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
+    cancel_event = register_cancel(req.request_id)
     try:
         parent = SESSIONS.get(req.parent_session_id)
         if parent is None:
@@ -1106,11 +1191,15 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
                     step_question,
                     trace=tracer,
                     history=history,
+                    cancel_event=cancel_event,
                 )
             except Exception as e:
                 answer = f"错误：求解失败（{type(e).__name__}: {e}）"
                 tracer.add("error", kind="agent_exception", message=answer)
             elapsed = time.perf_counter() - start
+            cancelled = cancel_event is not None and cancel_event.is_set()
+            if cancelled:
+                answer = CANCELLED_MESSAGE
 
             tracer.finish(
                 request_elapsed=round(elapsed, 4),
@@ -1122,7 +1211,9 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
             )
 
             error = tracer.error
-            if error is None and answer.startswith("错误："):
+            if cancelled:
+                error = CANCELLED_MESSAGE
+            elif error is None and answer.startswith("错误："):
                 error = answer
 
             if error is None:
@@ -1151,6 +1242,7 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
         finally:
             thread.lock.release()
     finally:
+        drop_cancel(req.request_id, cancel_event)
         _slots.release()
 
 

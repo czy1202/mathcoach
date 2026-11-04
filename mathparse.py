@@ -32,6 +32,71 @@ TRANSFORMS = standard_transformations + (
     implicit_multiplication_application,
 )
 
+# parse_expr 最终走 eval。这里把可执行名字缩到数学函数和常量，
+# 并先拒绝属性访问、分号、引号等非数学写法，避免模型/用户输入借
+# sympy 执行任意 Python。未知函数名仍会被 auto_symbol 当成普通符号。
+_SAFE_GLOBALS: dict[str, object] = {
+    "__builtins__": {},
+    "Symbol": sp.Symbol,
+    "Integer": sp.Integer,
+    "Float": sp.Float,
+    "Rational": sp.Rational,
+    "pi": sp.pi,
+    "E": sp.E,
+    "I": sp.I,
+    "oo": sp.oo,
+    "zoo": sp.zoo,
+    "nan": sp.nan,
+    "sqrt": sp.sqrt,
+    "Abs": sp.Abs,
+    "factorial": sp.factorial,
+    "exp": sp.exp,
+    "log": sp.log,
+    "ln": sp.log,
+    "sin": sp.sin,
+    "cos": sp.cos,
+    "tan": sp.tan,
+    "cot": sp.cot,
+    "sec": sp.sec,
+    "csc": sp.csc,
+    "asin": sp.asin,
+    "acos": sp.acos,
+    "atan": sp.atan,
+    "acot": sp.acot,
+    "sinh": sp.sinh,
+    "cosh": sp.cosh,
+    "tanh": sp.tanh,
+    "asinh": sp.asinh,
+    "acosh": sp.acosh,
+    "atanh": sp.atanh,
+    "sign": sp.sign,
+    "floor": sp.floor,
+    "ceiling": sp.ceiling,
+    "Max": sp.Max,
+    "Min": sp.Min,
+    "Piecewise": sp.Piecewise,
+    "Sum": sp.Sum,
+    "Product": sp.Product,
+    "Integral": sp.Integral,
+    "Derivative": sp.Derivative,
+    "Limit": sp.Limit,
+    "integrate": sp.integrate,
+    "diff": sp.diff,
+    "limit": sp.limit,
+    "summation": sp.summation,
+    "simplify": sp.simplify,
+    "factor": sp.factor,
+    "expand": sp.expand,
+}
+
+# 数学表达式不需要这些写法；出现即拒绝，尤其防止 __class__ 这类逃逸。
+_FORBIDDEN_EXPR_RE = re.compile(
+    r"__|`|;|[\"']"
+    r"|\b(?:eval|exec|compile|open|getattr|setattr|globals|locals)\s*\("
+    r"|\b(?:lambda|def|class|import|from|for|while|if|else|try|except|finally"
+    r"|raise|assert|with|yield|return)\b"
+)
+
 # 上标/下标字符映射
 _SUPERSCRIPT_MAP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹⁻⁺ⁿ", "0123456789-+n")
 _SUBSCRIPT_MAP = str.maketrans("₀₁₂₃₄₅₆₇₈₉ₙ", "0123456789n")
@@ -243,4 +308,11 @@ def parse_math(expr: object) -> sp.Expr:
     if expr is None:
         raise ValueError("表达式不能为 None")
 
-    return parse_expr(normalize_math_text(expr), transformations=TRANSFORMS)
+    text = normalize_math_text(expr)
+    if _FORBIDDEN_EXPR_RE.search(text):
+        raise ValueError("表达式包含不允许的语法")
+    return parse_expr(
+        text,
+        global_dict=_SAFE_GLOBALS,
+        transformations=TRANSFORMS,
+    )

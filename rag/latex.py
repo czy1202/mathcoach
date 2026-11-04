@@ -99,14 +99,51 @@ def parse_response(text: str) -> list[dict]:
 
 _CJK_PERIOD_RE = re.compile(r"\s*\\text\{。\}\s*(\$\$|\$)")
 
+# 展示层只需要知道哪些片段已经是公式；这里不解析 TeX，只按分隔符切分。
+_MATH_SPAN_RE = re.compile(
+    r"(\$\$[\s\S]*?\$\$|\$[^$\n]*?\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\))"
+)
+
+# 模型偶尔会把 LaTeX 命令漏在 $...$ 外面。最常见的是填空题横线
+# ``\underline{\qquad}``、旧题的 ``\_\_\_``，以及把换行写成字面量 ``\n``。
+# 这些内容会绕过前端的公式识别，直接以源码显示。
+_BARE_LATEX_RE = re.compile(
+    r"(?:\\_){2,}"
+    r"|\\(?:d?frac|t?frac)\s*\{[^{}]*\}\s*\{[^{}]*\}"
+    r"|\\(?:underline|overline|boxed|text|mathrm|mathbf|operatorname)"
+    r"\s*\{[^{}]*\}"
+    r"|\\sqrt\s*(?:\[[^\]]*\])?\s*\{[^{}]*\}"
+)
+
+
+def _fix_bare_latex_segment(segment: str) -> str:
+    """修一段公式分隔符之外的普通文字。"""
+    # JSON / 模型有时输出两个字面字符 “\n”，Markdown 不会把它当换行。
+    segment = segment.replace("\\n", "\n")
+
+    def replace(match: re.Match) -> str:
+        raw = match.group(0)
+        if raw.startswith("\\_"):
+            # 老试卷用下划线填空，转成和 \underline 一样宽的数学横线。
+            return "$\\underline{\\qquad\\qquad}$"
+        return f"${raw}$"
+
+    return _BARE_LATEX_RE.sub(replace, segment)
+
 
 def clean_latex(latex: str) -> str:
-    """把公式末尾的 ``\\text{。}`` 移到公式外面。
+    """清理题库重建结果，避免公式以源码形式露出。
 
-    模型常把填空题末尾的句号写进公式；KaTeX 能渲染，但字体和间距
-    都不对。这里只处理紧贴结束分隔符的情况，正文里的句号不动。
+    1. 把公式末尾的 ``\\text{。}`` 移到公式外面；
+    2. 把漏在 ``$...$`` 外面的 LaTeX 命令补上分隔符；
+    3. 把字面量 ``\\n`` 还原成真正的换行。
     """
-    return _CJK_PERIOD_RE.sub(r"\1。", latex).strip()
+    cleaned = _CJK_PERIOD_RE.sub(r"\1。", latex).strip()
+    parts = _MATH_SPAN_RE.split(cleaned)
+    # split 的奇数项是公式本身，保持原样；偶数项是正文，做保守修复。
+    for index in range(0, len(parts), 2):
+        parts[index] = _fix_bare_latex_segment(parts[index])
+    return "".join(parts)
 
 
 def _digit_counts(text: str) -> Counter:

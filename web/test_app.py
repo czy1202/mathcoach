@@ -23,9 +23,13 @@ def _clear_sessions():
     """每个测试从空会话开始，避免全局存储互相污染。"""
     web_app.SESSIONS.clear()
     web_app.STEP_SESSIONS.clear()
+    with web_app._CANCEL_LOCK:
+        web_app._CANCEL_EVENTS.clear()
     yield
     web_app.SESSIONS.clear()
     web_app.STEP_SESSIONS.clear()
+    with web_app._CANCEL_LOCK:
+        web_app._CANCEL_EVENTS.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -311,6 +315,7 @@ def test_ask_with_stub_client(monkeypatch, tmp_path):
     assert response.status_code == 200
     data = response.json()
     assert data["final_answer"] == "1"
+    assert data["final_answer_display"] == "1"
     assert "最终答案：1" in data["answer"]
     assert "最终答案：" not in data["display_answer"]
     assert data["llm_calls"] == 2
@@ -321,6 +326,26 @@ def test_ask_with_stub_client(monkeypatch, tmp_path):
     assert data["turn"] == 1
     assert data["follow_up"] is False
     assert (tmp_path / data["trace_file"]).exists()
+
+
+def test_ask_returns_renderable_final_answer(monkeypatch, tmp_path):
+    """最终答案卡片要拿到保留 $...$ 的展示版，而不是判分器格式。"""
+
+    class FormulaClient:
+        def chat(self, messages, tools=None):
+            return LLMResponse(
+                content="推导略。\n\n最终答案：$\\lim_{n\\to\\infty}x_n=b$"
+            )
+
+    monkeypatch.setattr(web_app, "_client", FormulaClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post("/api/ask", json={"question": "求极限"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["final_answer"] == "lim_{ntoinfty}x_n=b"
+    assert data["final_answer_display"] == "$\\lim_{n\\to\\infty}x_n=b$"
 
 
 def test_ask_rejects_blank_question():
@@ -645,3 +670,67 @@ def test_strip_answer_marker_removes_empty_trailing_heading():
     """去掉答案标记后，结尾空标题不应留下。"""
     text = "解题过程\n\n## 最终答案\n\n最终答案：1/2"
     assert web_app.strip_answer_marker(text) == "解题过程"
+
+
+# ---------- 停止生成 ----------
+
+def test_cancel_endpoint_sets_registered_event():
+    """浏览器点停止后，服务端对应请求的取消事件应被置位。"""
+    event = web_app.register_cancel("req-test-cancel")
+    assert event is not None
+    assert not event.is_set()
+
+    response = client.post(
+        "/api/ask/cancel",
+        json={"request_id": "req-test-cancel"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": True}
+    assert event.is_set()
+    web_app.drop_cancel("req-test-cancel", event)
+
+
+def test_cancel_unknown_request_is_noop():
+    """请求已经结束时再次取消不应报错。"""
+    response = client.post(
+        "/api/ask/cancel",
+        json={"request_id": "req-does-not-exist"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"cancelled": False}
+
+
+def test_cancel_rejects_invalid_request_id():
+    response = client.post(
+        "/api/ask/cancel",
+        json={"request_id": "bad id!"},
+    )
+
+    assert response.status_code == 422
+
+
+class SelfCancellingClient:
+    """模型返回时，用户已经点了停止。"""
+
+    def chat(self, messages, tools=None):
+        web_app.request_cancel("req-e2e-cancel")
+        return LLMResponse(content="最终答案：1")
+
+
+def test_ask_cancelled_does_not_append_turn(monkeypatch, tmp_path):
+    """取消后不能把半截回答写进会话，下一轮也不应带这段历史。"""
+    monkeypatch.setattr(web_app, "_client", SelfCancellingClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "测试取消", "request_id": "req-e2e-cancel"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["error"] == "已停止生成。"
+    assert data["answer"] == "已停止生成。"
+    assert data["turn_id"] is None

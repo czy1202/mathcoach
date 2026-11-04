@@ -109,6 +109,74 @@ def _looks_like_answer(text: str) -> bool:
     return bool(text) and len(text) <= 80 and bool(_ANSWER_HINT_RE.search(text))
 
 
+_DISPLAY_MATH_RE = re.compile(
+    r"\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)"
+)
+
+# “最终结论不变：…”这类结尾句，只把冒号后的答案留给展示卡片。
+_DISPLAY_PREFIX_RE = re.compile(
+    r"^\s*(?:最终结论(?:不变)?|最终答案|答案|所以|因此|故)\s*"
+    r"(?:[:：]|是|为)\s*"
+)
+
+
+def _display_candidate(raw: str) -> str:
+    """把答案行整理成适合直接渲染的 Markdown / LaTeX 文本。
+
+    与 ``_clean`` 不同：这里保留 ``$...$``，因为展示卡片需要交给 KaTeX，
+    而判分器需要的是去掉定界符后的纯表达式。
+    """
+    text = str(raw or "").strip().strip("*_`").strip()
+    spans = _DISPLAY_MATH_RE.findall(text)
+    if spans:
+        # 主答案通常比尾部条件更长：$f^{(n)}(1)=ne$（$n\ge 1$）应取前者。
+        # 长度相同时保留先出现的那个。
+        return max(spans, key=len).strip()
+    if text.startswith(r"\boxed{") and text.endswith("}"):
+        text = text[len(r"\boxed{"):-1]
+    text = _DISPLAY_PREFIX_RE.sub("", text)
+    return text.rstrip("。．.；;，, ").strip()
+
+
+def extract_final_answer_display(
+    text: str | None,
+    allow_fallback: bool = True,
+) -> str | None:
+    """提取适合展示的最终答案，保留公式定界符；找不到返回 None。
+
+    规则与 :func:`extract_final_answer` 一致，但不清洗 LaTeX。这样
+    ``最终答案：$\\lim_{n\\to\\infty}x_n=b$`` 在卡片里仍然是可渲染公式，
+    不会退化成 ``lim_ntoinfty`` 这类判分器内部格式。
+    """
+    if not text or not text.strip():
+        return None
+
+    lines = text.splitlines()
+    for idx in range(len(lines) - 1, -1, -1):
+        markers = list(_MARKER_RE.finditer(lines[idx]))
+        if not markers:
+            continue
+        candidate = lines[idx][markers[-1].end():]
+        if not candidate.strip():
+            candidate = next((line for line in lines[idx + 1:] if line.strip()), "")
+        display = _display_candidate(candidate)
+        if display:
+            return display
+
+    if not allow_fallback:
+        return None
+
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        if _looks_like_answer(_clean(line)):
+            return _display_candidate(line) or None
+        # 没有答案标记时只看最后一行：这既保留“最终结论：$...$”里的公式，
+        # 又不会把中间过程里的公式误当成答案。
+        break
+    return None
+
+
 def extract_final_answer(
     text: str | None,
     allow_fallback: bool = True,

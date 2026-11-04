@@ -4,7 +4,9 @@
     pytest -v
 """
 
-from agent import Agent, FOLLOWUP_PROMPT, SYSTEM_PROMPT
+import threading
+
+from agent import Agent, CANCELLED_MESSAGE, FOLLOWUP_PROMPT, SYSTEM_PROMPT
 from llm import LLMResponse, ToolCall
 from tracing import TraceRecorder
 
@@ -221,3 +223,45 @@ def test_custom_system_prompt_replaces_default():
 
     system = _find(client.requests[0], "system")
     assert system["content"] == "你是复核员"
+
+
+# ---------- 停止生成 ----------
+
+class CancelDuringChatClient:
+    """第一次模型调用期间用户点了停止。"""
+
+    def __init__(self, event: threading.Event) -> None:
+        self.event = event
+        self.calls = 0
+
+    def chat(self, messages, tools=None):
+        self.calls += 1
+        self.event.set()
+        return LLMResponse(tool_calls=[ToolCall(
+            name="verify_with_sympy",
+            args={"expr_a": "1", "expr_b": "1"},
+            id="call_cancel_1",
+        )])
+
+
+def test_cancel_before_first_step_skips_model():
+    """已经取消的请求不应再调用模型。"""
+    client = RecordingClient()
+    event = threading.Event()
+    event.set()
+
+    answer = Agent(client=client).run("测试题", cancel_event=event)
+
+    assert answer == CANCELLED_MESSAGE
+    assert client.requests == []
+
+
+def test_cancel_during_model_call_skips_tools_and_next_step():
+    """取消后不再执行工具，也不进入下一轮模型调用。"""
+    event = threading.Event()
+    client = CancelDuringChatClient(event)
+
+    answer = Agent(client=client).run("测试题", cancel_event=event)
+
+    assert answer == CANCELLED_MESSAGE
+    assert client.calls == 1

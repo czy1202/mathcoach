@@ -6,7 +6,7 @@
 
 import pytest
 
-from eval.extract import extract_final_answer
+from eval.extract import extract_final_answer, extract_final_answer_display
 
 
 # ---------- 标准写法 ----------
@@ -93,3 +93,49 @@ def test_keep_assignment_for_parts_judging():
     text = "最终答案：$f(0)=-3$"
     assert extract_final_answer(text) == "-3"
     assert extract_final_answer(text, strip_assignment=False) == "f(0)=-3"
+
+
+# ---------- 展示用答案 ----------
+
+def test_display_answer_keeps_latex():
+    """答案卡片要保留 $...$，不能拿判分器的归一化字符串来展示。"""
+    text = "推导略。\n\n最终答案：$\\lim_{n\\to\\infty}x_n=b$"
+    assert (
+        extract_final_answer_display(text)
+        == "$\\lim_{n\\to\\infty}x_n=b$"
+    )
+
+
+def test_display_answer_uses_last_math_on_conclusion_line():
+    """没有“最终答案”标记时，结尾结论里的公式仍应完整展示。"""
+    text = (
+        "推导略。\n\n"
+        "最终结论不变：$\\lim_{n\\to\\infty}x_n=b$。"
+    )
+    assert (
+        extract_final_answer_display(text)
+        == "$\\lim_{n\\to\\infty}x_n=b$"
+    )
+
+
+def test_display_answer_handles_choice_and_next_line():
+    assert extract_final_answer_display("最终答案：B") == "B"
+    assert extract_final_answer_display("最终答案：\n$\\frac{1}{2}$") == "$\\frac{1}{2}$"
+
+
+def test_display_answer_prefers_main_formula_over_condition():
+    """$f^{(n)}(1)=ne$（$n\\ge 1$）不能把尾部条件当成答案。"""
+    text = r"最终答案：$f^{(n)}(1)=ne$（$n\ge 1$）"
+    assert extract_final_answer_display(text) == "$f^{(n)}(1)=ne$"
+
+
+def test_display_answer_strips_boxed():
+    assert (
+        extract_final_answer_display(r"最终答案：\boxed{\frac{1}{2}}")
+        == r"\frac{1}{2}"
+    )
+
+
+def test_display_answer_respects_no_fallback():
+    text = "推导略。\n最终结论：$x=1$"
+    assert extract_final_answer_display(text, allow_fallback=False) is None

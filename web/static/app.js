@@ -7,6 +7,7 @@
   const form = document.getElementById("form");
   const input = document.getElementById("question");
   const sendBtn = document.getElementById("send");
+  const stopBtn = document.getElementById("stop");
   const newChatBtn = document.getElementById("new-chat");
   const status = document.getElementById("status");
   const statusText = document.getElementById("status-text");
@@ -29,6 +30,7 @@
   const stepForm = document.getElementById("step-form");
   const stepInput = document.getElementById("step-question");
   const stepSend = document.getElementById("step-send");
+  const stepStop = document.getElementById("step-stop");
   const ocrBtn = document.getElementById("ocr-btn");
   const ocrFile = document.getElementById("ocr-file");
   const ocrPreview = document.getElementById("ocr-preview");
@@ -79,6 +81,8 @@
   let formulaEditIndex = -1;
   let formulaLastFocus = null;
   let sessionId = null;
+  let solveAbort = null;
+  let solveRequestId = "";
 
   let mode = null; // null = 模式选择页
   let papersState = "idle"; // idle | loading | ready | error
@@ -90,6 +94,27 @@
   const stepThreads = new Map();
   let activeStepKey = null;
   let lastStepButton = null;
+
+  function newRequestId() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID().replace(/-/g, "");
+    }
+    return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // 浏览器中断 fetch 只能让自己不再等待，服务端线程仍可能在跑。
+  // 额外通知一次，让 Agent 在下一次模型/工具调用前停下。
+  function requestCancel(requestId) {
+    if (!requestId) return;
+    fetch("/api/ask/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ request_id: requestId }),
+      keepalive: true,
+    }).catch(() => {
+      // 取消失败不影响本地恢复输入；后台请求会按超时自行结束
+    });
+  }
 
   // ---------- Markdown / 公式渲染 ----------
   //
@@ -117,9 +142,48 @@
     "g",
   );
 
+  // 题库和模型偶尔会把 LaTeX 命令漏在 $...$ 外面，最常见的是填空题的
+  // \underline{\qquad}、旧题的 \_\_\_，以及字面量换行 \n。它们不会命中
+  // CODE_OR_MATH，用户就会直接看到源码。这里只修复公式和代码之外的文字。
+  const BARE_LATEX = new RegExp(
+    [
+      "((?:\\\\_){2,})",
+      "(\\\\(?:d?frac|t?frac)\\s*\\{[^{}]*\\}\\s*\\{[^{}]*\\})",
+      "(\\\\(?:underline|overline|boxed|text|mathrm|mathbf|operatorname)\\s*\\{[^{}]*\\})",
+      "(\\\\sqrt\\s*(?:\\[[^\\]]*\\])?\\s*\\{[^{}]*\\})",
+    ].join("|"),
+    "g",
+  );
+
+  function fixBareLatexSegment(segment) {
+    // JSON / 模型输出的两个字面字符 “\n”，Markdown 不会把它当换行。
+    const withNewlines = segment.replace(/\\n/g, "\n");
+    return withNewlines.replace(BARE_LATEX, (match) =>
+      match.startsWith("\\_")
+        ? "$\\underline{\\qquad\\qquad}$"
+        : `$${match}$`,
+    );
+  }
+
+  function normalizeBareLatex(text) {
+    const source = String(text || "");
+    if (!source.includes("\\")) return source;
+    const scanner = new RegExp(CODE_OR_MATH.source, "g");
+    let result = "";
+    let last = 0;
+    let match;
+    while ((match = scanner.exec(source))) {
+      result += fixBareLatexSegment(source.slice(last, match.index));
+      result += match[0];
+      last = match.index + match[0].length;
+    }
+    result += fixBareLatexSegment(source.slice(last));
+    return result;
+  }
+
   function protectMath(text) {
     const store = [];
-    const protectedText = String(text).replace(
+    const protectedText = normalizeBareLatex(text).replace(
       CODE_OR_MATH,
       (match, code, math) => {
         if (code || !math) return match;
@@ -388,6 +452,53 @@
       .trim();
   }
 
+  const FINAL_MARKER_RE =
+    /(?:\*\*|__)?\s*(?:最终\s*答案|答案|final\s*answer|answer)\s*(?:\*\*|__)?\s*(?:[:：]|是|为)/i;
+  const DISPLAY_MATH_RE =
+    /\$\$[\s\S]*?\$\$|\$[^$\n]*\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)/g;
+
+  function answerDisplayCandidate(raw) {
+    const text = String(raw || "").trim().replace(/^[*_`]+|[*_`]+$/g, "").trim();
+    const spans = text.match(DISPLAY_MATH_RE);
+    if (spans && spans.length) {
+      // 主答案通常比尾部条件更长：$f^{(n)}(1)=ne$（$n\ge 1$）应取前者。
+      return spans.reduce((best, span) => (span.length > best.length ? span : best));
+    }
+    return text
+      .replace(
+        /^(?:最终结论(?:不变)?|最终答案|答案|所以|因此|故)\s*(?:[:：]|是|为)\s*/,
+        "",
+      )
+      .replace(/[。．.；;，,]+$/, "")
+      .trim();
+  }
+
+  // 旧版后端只返回判分器用的 final_answer（已经去掉 $ 并做了符号归一化），
+  // 卡片直接展示会露出 lim_ntoinfty 这类源码。这里从原始回答的最后一行
+  // 重新取回带 $...$ 的公式；新版后端会直接给 final_answer_display。
+  function extractAnswerDisplay(answer) {
+    const lines = String(answer || "").split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const match = lines[i].match(FINAL_MARKER_RE);
+      if (!match) continue;
+      let candidate = lines[i].slice(match.index + match[0].length);
+      if (!candidate.trim()) {
+        candidate = lines.slice(i + 1).find((line) => line.trim()) || "";
+      }
+      const display = answerDisplayCandidate(candidate);
+      if (display) return display;
+    }
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (!lines[i].trim()) continue;
+      const spans = lines[i].match(DISPLAY_MATH_RE);
+      if (spans && spans.length) {
+        return spans.reduce((best, span) => (span.length > best.length ? span : best));
+      }
+      break;
+    }
+    return "";
+  }
+
   function formatFinalAnswer(value) {
     const text = String(value)
       .replace(/\(\(([^()]+)\)\/\(([^()]+)\)\)/g, "($1)/($2)")
@@ -397,8 +508,16 @@
     // 服务端提取答案时会把 \frac{a}{b} 归一化成 ((a)/(b)) 交给判分器。
     // 卡片是展示给用户看的，这里把整个答案就是简单分数的情况还原成排版公式。
     const fraction = text.match(/^\(?([^()/]+)\)?\s*\/\s*\(?([^()/]+)\)?$/);
-    if (fraction && !text.includes("$")) {
+    if (fraction && !text.includes("$") && !text.includes("=")) {
       return `$\\frac{${latexifySimple(fraction[1])}}{${latexifySimple(fraction[2])}}$`;
+    }
+
+    // 没有 $...$ 的纯数学答案也直接排版，例如 x=1/2、x_n、-3。
+    const plainMath =
+      !/[一-鿿]/.test(text) &&
+      /[=+\-*/^_\\<>]|π/.test(text);
+    if (plainMath && !text.includes("$") && !text.includes("\\(")) {
+      return `$${text}$`;
     }
     return text;
   }
@@ -674,8 +793,12 @@
     if (data.final_answer) {
       const card = article.querySelector(".answer-card");
       card.hidden = false;
+      const finalValue =
+        data.final_answer_display ||
+        extractAnswerDisplay(data.answer) ||
+        data.final_answer;
       card.querySelector(".value").innerHTML = renderInline(
-        formatFinalAnswer(data.final_answer),
+        formatFinalAnswer(finalValue),
       );
     }
 
@@ -730,6 +853,16 @@
     return article;
   }
 
+  function createNoticeMessage(message) {
+    const article = document.createElement("article");
+    article.className = "message assistant";
+    article.innerHTML = `
+      <div class="avatar">∑</div>
+      <div class="bubble"><div class="notice-box"></div></div>`;
+    article.querySelector(".notice-box").textContent = message;
+    return article;
+  }
+
   // ---------- 步骤追问侧栏 ----------
 
   function stepStateFor(data, step) {
@@ -748,6 +881,8 @@
         threadSessionId: null,
         messages: [],
         busy: false,
+        abort: null,
+        requestId: "",
       };
       stepThreads.set(key, state);
     }
@@ -839,6 +974,7 @@
     renderStepMessages(state);
     stepInput.disabled = state.busy;
     stepSend.disabled = state.busy;
+    if (stepStop) stepStop.hidden = !state.busy;
     if (stepNewChat) stepNewChat.disabled = state.busy;
     stepInput.placeholder = state.busy
       ? "正在回答…"
@@ -893,7 +1029,11 @@
     const question = stepInput.value.trim();
     if (!state || !question || state.busy) return;
 
+    const requestId = newRequestId();
+    const controller = new AbortController();
     state.busy = true;
+    state.abort = controller;
+    state.requestId = requestId;
     state.messages.push({ role: "user", text: question });
     stepInput.value = "";
     resizeStepInput();
@@ -903,6 +1043,7 @@
       const response = await fetch("/api/ask-step", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
         body: JSON.stringify({
           question,
           parent_session_id: state.parentSessionId,
@@ -911,6 +1052,7 @@
           step_index: state.stepIndex,
           step_text: state.stepMarkdown,
           step_session_id: state.threadSessionId,
+          request_id: requestId,
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -925,18 +1067,37 @@
         error: Boolean(data.error),
       });
     } catch (err) {
-      state.messages.push({
-        role: "assistant",
-        text: err.message || "网络请求失败。",
-        error: true,
-      });
+      if (controller.signal.aborted) {
+        state.messages.push({
+          role: "assistant",
+          text: "已停止生成。",
+          error: false,
+        });
+      } else {
+        state.messages.push({
+          role: "assistant",
+          text: err.message || "网络请求失败。",
+          error: true,
+        });
+      }
     } finally {
+      if (state.abort === controller) state.abort = null;
+      if (state.requestId === requestId) state.requestId = "";
       state.busy = false;
       if (activeStepKey === state.key) {
         renderStepPanel(state);
         if (!stepPanel.hidden) stepInput.focus();
       }
     }
+  }
+
+  function stopStepQuestion() {
+    const state = activeStepKey ? stepThreads.get(activeStepKey) : null;
+    if (!state || !state.busy) return;
+
+    const requestId = state.requestId;
+    if (state.abort) state.abort.abort();
+    requestCancel(requestId);
   }
 
   // ---------- 真题浏览 ----------
@@ -1286,11 +1447,19 @@
       ocrCorrectSubmit.textContent = ocrFixBusy ? "修正中…" : "AI 修正";
     }
     sendBtn.querySelector(".send-label").textContent = busy ? "求解中" : "发送";
+    if (stopBtn) stopBtn.hidden = !busy;
   }
 
   function setBusy(next) {
     busy = next;
     updateControls();
+  }
+
+  function stopSolve() {
+    if (!busy) return;
+    const requestId = solveRequestId;
+    if (solveAbort) solveAbort.abort();
+    requestCancel(requestId);
   }
 
   function startNewChat() {
@@ -1523,7 +1692,9 @@
   function setOcrDraft(text, options = {}) {
     const focusInput = options.focusInput !== false;
     const limit = Number(input.maxLength) > 0 ? Number(input.maxLength) : 5000;
-    let next = normalizeOcrMath(String(text || "")).trim();
+    let next = normalizeBareLatex(
+      normalizeOcrMath(String(text || "")),
+    ).trim();
     let truncated = false;
     if (next.length > limit) {
       next = next.slice(0, limit);
@@ -1927,6 +2098,11 @@
       .join("\n\n");
     if (!question || busy || ocrBusy || ocrFixBusy) return;
 
+    const requestId = newRequestId();
+    const controller = new AbortController();
+    solveRequestId = requestId;
+    solveAbort = controller;
+
     clearOcrStatus();
     clearOcrDraft();
     setBusy(true);
@@ -1943,7 +2119,12 @@
       const response = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question, session_id: sessionId }),
+        signal: controller.signal,
+        body: JSON.stringify({
+          question,
+          session_id: sessionId,
+          request_id: requestId,
+        }),
       });
       const data = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -1958,9 +2139,15 @@
       scrollToElement(userMessage);
     } catch (err) {
       clearInterval(pending._timer);
-      pending.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
+      if (controller.signal.aborted) {
+        pending.replaceWith(createNoticeMessage("已停止生成。"));
+      } else {
+        pending.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
+      }
       scrollToElement(userMessage);
     } finally {
+      if (solveAbort === controller) solveAbort = null;
+      if (solveRequestId === requestId) solveRequestId = "";
       setBusy(false);
       input.focus();
     }
@@ -1970,6 +2157,14 @@
     event.preventDefault();
     submitQuestion();
   });
+
+  if (stopBtn) {
+    stopBtn.addEventListener("click", stopSolve);
+  }
+
+  if (stepStop) {
+    stepStop.addEventListener("click", stopStepQuestion);
+  }
 
   if (stepForm) {
     stepForm.addEventListener("submit", (event) => {

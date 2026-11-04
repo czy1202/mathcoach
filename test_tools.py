@@ -139,3 +139,19 @@ def test_tools_registry_contains_verify_with_sympy():
     """注册表里应登记 verify_with_sympy，且对应的是可调用对象。"""
     assert "verify_with_sympy" in TOOLS
     assert callable(TOOLS["verify_with_sympy"]["函数"])
+
+
+# ---------- 表达式解析安全边界 ----------
+
+def test_verify_rejects_code_execution_payload():
+    """sympy 解析不能执行任意 Python；恶意输入只算验证失败。"""
+    payload = "__import__('os').system('echo hacked')"
+    assert verify_with_sympy(payload, "0") is False
+
+
+def test_verify_still_supports_integrate():
+    """限制命名空间后，常用的 integrate 仍必须可用。"""
+    assert verify_with_sympy(
+        "integrate(x, (x, 0, 1))",
+        "1/2",
+    ) is True
