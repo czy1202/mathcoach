@@ -80,6 +80,7 @@
   let ocrSourceOpen = false;
   let formulaEditIndex = -1;
   let formulaLastFocus = null;
+  const SESSION_STORAGE_KEY = "mathcoach.session_id";
   let sessionId = null;
   let solveAbort = null;
   let solveRequestId = "";
@@ -100,6 +101,33 @@
       return window.crypto.randomUUID().replace(/-/g, "");
     }
     return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // 页面刷新后从服务端恢复上一轮会话；隐私模式下 localStorage 可能不可用，
+  // 失败时静默按“新对话”处理，不影响正常求解。
+  function rememberSession(id) {
+    if (!id) return;
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, id);
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function forgetSession() {
+    try {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (err) {
+      // ignore
+    }
+  }
+
+  function savedSessionId() {
+    try {
+      return window.localStorage.getItem(SESSION_STORAGE_KEY) || "";
+    } catch (err) {
+      return "";
+    }
   }
 
   // 浏览器中断 fetch 只能让自己不再等待，服务端线程仍可能在跑。
@@ -806,17 +834,21 @@
     if (related) article.querySelector(".related-slot").appendChild(related);
 
     const meta = article.querySelector(".meta");
-    const parts = [
-      `耗时 ${Number(data.elapsed || 0).toFixed(2)}s`,
-      `模型 ${data.llm_calls || 0} 次`,
-      `工具 ${data.tool_calls || 0} 次`,
-      `${Number(data.tokens || 0).toLocaleString()} tokens`,
-    ];
-    if (Number(data.turn || 1) > 1) {
-      parts.unshift(`第 ${data.turn} 轮`);
+    if (data.restored) {
+      meta.textContent = "已从本地会话恢复，可继续追问";
+    } else {
+      const parts = [
+        `耗时 ${Number(data.elapsed || 0).toFixed(2)}s`,
+        `模型 ${data.llm_calls || 0} 次`,
+        `工具 ${data.tool_calls || 0} 次`,
+        `${Number(data.tokens || 0).toLocaleString()} tokens`,
+      ];
+      if (Number(data.turn || 1) > 1) {
+        parts.unshift(`第 ${data.turn} 轮`);
+      }
+      if (data.tool_errors) parts.push(`工具错误 ${data.tool_errors} 次`);
+      meta.textContent = parts.join(" · ");
     }
-    if (data.tool_errors) parts.push(`工具错误 ${data.tool_errors} 次`);
-    meta.textContent = parts.join(" · ");
 
     const details = article.querySelector(".trace");
     if ((data.steps && data.steps.length) || (data.tools && data.tools.length)) {
@@ -1476,6 +1508,7 @@
 
     const oldSession = sessionId;
     sessionId = null;
+    forgetSession();
     chat.querySelectorAll(".message").forEach((node) => node.remove());
     showWelcome();
 
@@ -1493,6 +1526,60 @@
       fetch(`/api/session/${oldSession}`, { method: "DELETE" }).catch(() => {
         // 删除失败不影响本地开新对话，旧会话会按 TTL 自行过期
       });
+    }
+  }
+
+  // 刷新页面后恢复上一轮会话。服务端只存最终问答，因此不显示轨迹，
+  // 但最终答案卡、分步结构和“问这一步”仍然可用。
+  async function restoreSession() {
+    if (mode !== null || busy) return;
+    const saved = savedSessionId();
+    if (!saved) return;
+
+    try {
+      const response = await fetch(`/api/session/${encodeURIComponent(saved)}`);
+      if (response.status === 404) {
+        forgetSession();
+        return;
+      }
+      if (!response.ok) return;
+
+      const data = await response.json();
+      // 等待请求期间用户可能已经点了模式选择，此时不要抢走界面。
+      if (mode !== null || busy) return;
+      const turns = Array.isArray(data.turns) ? data.turns : [];
+      if (!turns.length) {
+        forgetSession();
+        return;
+      }
+
+      sessionId = data.session_id || saved;
+      rememberSession(sessionId);
+      setMode("solve");
+      chat.querySelectorAll(".message").forEach((node) => node.remove());
+      hideWelcome();
+
+      turns.forEach((turn) => {
+        appendUser(turn.question || "");
+        chat.appendChild(createAssistantMessage({
+          answer: turn.answer || "",
+          display_answer: turn.display_answer || turn.answer || "",
+          session_id: sessionId,
+          turn_id: turn.id || "",
+          turn: turn.turn || 1,
+          follow_up: Boolean(turn.follow_up),
+          final_answer: turn.final_answer || null,
+          final_answer_display: turn.final_answer_display || null,
+          solution: turn.solution || null,
+          restored: true,
+        }));
+      });
+
+      input.placeholder = "继续追问这道题，例如：这一步为什么？";
+      resizeInput();
+      chat.scrollTop = chat.scrollHeight;
+    } catch (err) {
+      // 服务未连接时保持欢迎页，下一次发送仍会走正常的错误提示。
     }
   }
 
@@ -2131,6 +2218,7 @@
         throw new Error(errorText(data.detail, response.status));
       }
       sessionId = data.session_id || sessionId;
+      rememberSession(sessionId);
       input.placeholder = "继续追问这道题，例如：这一步为什么？";
       clearInterval(pending._timer);
       pending.replaceWith(createAssistantMessage(data));
@@ -2399,4 +2487,5 @@
   }
 
   loadHealth();
+  restoreSession();
 })();

@@ -5,6 +5,7 @@
 """
 
 import json
+import threading
 
 import pytest
 import config
@@ -13,21 +14,29 @@ from fastapi.testclient import TestClient
 import tools
 import web.app as web_app
 from llm import LLMResponse, StubClient, ToolCall
+from web.sessions import SessionStore
 
 
 client = TestClient(web_app.app)
 
 
 @pytest.fixture(autouse=True)
-def _clear_sessions():
-    """每个测试从空会话开始，避免全局存储互相污染。"""
-    web_app.SESSIONS.clear()
-    web_app.STEP_SESSIONS.clear()
+def _clear_sessions(monkeypatch):
+    """每个测试从空的内存会话开始，不触碰本地持久化数据库。"""
+    monkeypatch.setattr(web_app, "SESSIONS", SessionStore())
+    monkeypatch.setattr(
+        web_app,
+        "STEP_SESSIONS",
+        SessionStore(
+            max_sessions=200,
+            max_history_turns=4,
+            max_history_chars=24000,
+            max_assistant_chars=4000,
+        ),
+    )
     with web_app._CANCEL_LOCK:
         web_app._CANCEL_EVENTS.clear()
     yield
-    web_app.SESSIONS.clear()
-    web_app.STEP_SESSIONS.clear()
     with web_app._CANCEL_LOCK:
         web_app._CANCEL_EVENTS.clear()
 
@@ -429,6 +438,36 @@ def test_unknown_session_id_starts_fresh(monkeypatch, tmp_path):
     assert data["follow_up"] is False
 
 
+def test_get_session_restores_turns_and_steps(monkeypatch, tmp_path):
+    """刷新页面后应能取回问答、最终答案和可点击步骤。"""
+    monkeypatch.setattr(web_app, "_client", SolutionClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    created = client.post("/api/ask", json={"question": "求积分"}).json()
+    response = client.get(f"/api/session/{created['session_id']}")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["session_id"] == created["session_id"]
+    assert data["original_question"] == "求积分"
+    assert len(data["turns"]) == 1
+    turn = data["turns"][0]
+    assert turn["id"] == created["turn_id"]
+    assert turn["question"] == "求积分"
+    assert turn["follow_up"] is False
+    assert turn["final_answer"] == "1"
+    assert [step["label"] for step in turn["solution"]["steps"]] == [
+        "第一步", "第二步",
+    ]
+
+
+def test_get_session_returns_404_for_unknown_id():
+    response = client.get(f"/api/session/{'0' * 32}")
+
+    assert response.status_code == 404
+    assert "已过期" in response.json()["detail"]
+
+
 def test_delete_session_resets_context(monkeypatch, tmp_path):
     """删除会话后再用旧 id 提问，应该从第一轮重新开始。"""
     model = CountingClient()
@@ -734,3 +773,67 @@ def test_ask_cancelled_does_not_append_turn(monkeypatch, tmp_path):
     assert data["error"] == "已停止生成。"
     assert data["answer"] == "已停止生成。"
     assert data["turn_id"] is None
+
+
+class BlockingClient:
+    """模型调用卡住，用来模拟用户点停止时服务端线程还没返回。"""
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def chat(self, messages, tools=None):
+        self.started.set()
+        self.release.wait(3)
+        return LLMResponse(content="最终答案：旧回答")
+
+
+def test_cancel_releases_session_for_immediate_followup(monkeypatch, tmp_path):
+    """停止后旧请求仍在跑，用户也应能立刻追问，且旧结果不能写回。"""
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+    monkeypatch.setattr(web_app, "_client", StubClient())
+
+    first = client.post("/api/ask", json={"question": "原题"}).json()
+    session_id = first["session_id"]
+
+    blocking = BlockingClient()
+    monkeypatch.setattr(web_app, "_client", blocking)
+    result: dict = {}
+
+    def run_old_request() -> None:
+        try:
+            result["data"] = web_app.ask(web_app.AskRequest(
+                question="旧问题",
+                session_id=session_id,
+                request_id="req-blocking",
+            ))
+        except Exception as exc:  # pragma: no cover - 失败时便于定位
+            result["error"] = exc
+
+    worker = threading.Thread(target=run_old_request)
+    worker.start()
+    assert blocking.started.wait(3)
+
+    cancelled = client.post(
+        "/api/ask/cancel",
+        json={"request_id": "req-blocking"},
+    )
+    assert cancelled.json() == {"cancelled": True}
+
+    # 旧模型调用还没返回，但会话已释放，新追问应直接成功。
+    monkeypatch.setattr(web_app, "_client", StubClient())
+    second = web_app.ask(web_app.AskRequest(
+        question="新问题",
+        session_id=session_id,
+    ))
+    assert second.error is None
+    assert second.turn == 2
+
+    blocking.release.set()
+    worker.join(5)
+    assert not worker.is_alive()
+
+    session = web_app.SESSIONS.get(session_id)
+    assert [turn["question"] for turn in session.turns] == ["原题", "新问题"]
+    assert result["data"].error == "已停止生成。"
+    assert result["data"].turn_id is None

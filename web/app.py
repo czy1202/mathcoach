@@ -16,6 +16,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -38,7 +39,7 @@ from tools import (
     search_past_problems,
 )
 from tracing import TraceRecorder, new_trace_file
-from web.sessions import SessionStore
+from web.sessions import Session, SessionStore
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -99,30 +100,49 @@ _client_lock = threading.Lock()
 _slots = threading.BoundedSemaphore(MAX_CONCURRENT)
 # 图片识别另算：它不占模型并发额度，但连续点击会重复消耗 OCR 额度。
 _ocr_lock = threading.Lock()
-SESSIONS = SessionStore()
+
+
+def session_db_path() -> Path | None:
+    """返回会话数据库路径；设置 CMC_SESSION_DB=off 可退回纯内存模式。"""
+    raw = os.environ.get("CMC_SESSION_DB", "data/sessions.db").strip()
+    if raw.lower() in {"", "off", "none", "memory"}:
+        return None
+    path = Path(raw)
+    return path if path.is_absolute() else BASE_DIR.parent / path
+
+
+SESSION_DB_PATH = session_db_path()
+
+SESSIONS = SessionStore(
+    persist_path=SESSION_DB_PATH,
+    namespace="main",
+)
 
 # 网页端“停止生成”：浏览器先中断自己的等待，再按 request_id 置位这里的事件。
 # 已经发出的单次模型调用无法从另一个线程强杀，但 Agent 会在下一次调用前
 # 看到信号并停止，不会继续执行工具和后续步骤。
 _CANCEL_LOCK = threading.Lock()
-_CANCEL_EVENTS: dict[str, tuple[float, threading.Event]] = {}
+_CANCEL_EVENTS: dict[str, tuple[float, threading.Event, Session | None]] = {}
 _CANCEL_TTL = 300.0
 
 
-def register_cancel(request_id: str | None) -> threading.Event | None:
+def register_cancel(
+    request_id: str | None,
+    owner: Session | None = None,
+) -> threading.Event | None:
     """为一次请求登记取消信号；request_id 为空时返回 None。"""
     if not request_id:
         return None
     now = time.monotonic()
     with _CANCEL_LOCK:
         expired = [
-            key for key, (created, _) in _CANCEL_EVENTS.items()
+            key for key, (created, _, _) in _CANCEL_EVENTS.items()
             if now - created > _CANCEL_TTL
         ]
         for key in expired:
             _CANCEL_EVENTS.pop(key, None)
         event = threading.Event()
-        _CANCEL_EVENTS[request_id] = (now, event)
+        _CANCEL_EVENTS[request_id] = (now, event, owner)
         return event
 
 
@@ -137,13 +157,24 @@ def drop_cancel(request_id: str | None, event: threading.Event | None) -> None:
 
 
 def request_cancel(request_id: str) -> bool:
-    """置位某个请求的取消信号；请求不存在（已结束）时返回 False。"""
+    """置位取消信号，并立刻释放会话，让用户可以马上重新提问。
+
+    旧请求仍在后台跑，但它结束时会发现 active_request_id 已经被取消清掉，
+    因此不会把半截回答写回会话。已经发出的单次模型调用仍无法强杀。
+    """
     with _CANCEL_LOCK:
         current = _CANCEL_EVENTS.get(request_id)
         if current is None:
             return False
-        current[1].set()
-        return True
+        event = current[1]
+        owner = current[2]
+        event.set()
+
+    if owner is not None:
+        with owner.lock:
+            if owner.active_request_id == request_id:
+                owner.active_request_id = None
+    return True
 
 # 步骤追问有自己独立的短对话，绝不能写进主会话，否则主对话会出现
 # “用户问：这一步为什么”这种没有上下文的孤立消息。
@@ -152,6 +183,8 @@ STEP_SESSIONS = SessionStore(
     max_history_turns=4,
     max_history_chars=24000,
     max_assistant_chars=4000,
+    persist_path=SESSION_DB_PATH,
+    namespace="step",
 )
 
 
@@ -362,6 +395,26 @@ class SolutionBreakdown(BaseModel):
     intro: str = ""
     steps: list[SolutionStep] = Field(default_factory=list)
     outro: str = ""
+
+
+class SessionTurn(BaseModel):
+    """刷新页面后恢复一条历史回答所需的最小字段。"""
+
+    id: str = ""
+    question: str = ""
+    answer: str = ""
+    display_answer: str = ""
+    final_answer: str | None = None
+    final_answer_display: str | None = None
+    solution: SolutionBreakdown | None = None
+    turn: int = 1
+    follow_up: bool = False
+
+
+class SessionResponse(BaseModel):
+    session_id: str
+    original_question: str = ""
+    turns: list[SessionTurn] = Field(default_factory=list)
 
 
 class AskResponse(BaseModel):
@@ -763,8 +816,61 @@ def health() -> dict:
         "ocr_configured": ocr.is_configured(),
         "ocr_provider": ocr.get_provider(),
         "papers_available": index_available(),
+        "sessions": SESSIONS.size(),
+        "step_sessions": STEP_SESSIONS.size(),
+        "session_persistent": SESSIONS.persistent,
         **retriever_status(),
     }
+
+
+@app.get("/api/session/{session_id}", response_model=SessionResponse)
+def get_session(session_id: str) -> SessionResponse:
+    """恢复一个仍然存在的会话，供刷新页面后重建聊天记录。
+
+    只返回持久化下来的最终问答；轨迹和工具事件没有存库，因此恢复后
+    不显示“查看解题轨迹”，但步骤追问和继续追问仍然可用。
+    """
+    session = SESSIONS.get(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="会话不存在或已过期，请开始新对话。",
+        )
+
+    with session.lock:
+        original_question = session.original_question
+        turns = [dict(turn) for turn in session.turns]
+
+    restored: list[SessionTurn] = []
+    for index, turn in enumerate(turns, 1):
+        answer = str(turn.get("answer") or "")
+        normalized = normalize_math_delimiters(answer)
+        # 第一轮才允许“最后一行像答案”的兜底；追问和列真题不猜答案。
+        allow_fallback = index == 1 and not asks_for_more_info(answer)
+        display_answer = strip_answer_marker(normalized)
+        restored.append(SessionTurn(
+            id=str(turn.get("id") or ""),
+            question=str(turn.get("question") or ""),
+            answer=answer,
+            display_answer=display_answer,
+            final_answer=extract_final_answer(
+                answer,
+                allow_fallback=allow_fallback,
+            ),
+            final_answer_display=extract_final_answer_display(
+                normalized,
+                allow_fallback=allow_fallback,
+            ),
+            solution=parse_solution(display_answer),
+            turn=index,
+            follow_up=index > 1,
+        ))
+
+    return SessionResponse(
+        session_id=session.id,
+        original_question=original_question,
+        turns=restored,
+    )
 
 
 @app.post("/api/ocr", response_model=OcrResponse)
@@ -965,119 +1071,136 @@ def ask(req: AskRequest) -> AskResponse:
     if not _slots.acquire(timeout=0.5):
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
-    cancel_event = register_cancel(req.request_id)
+    session: Session | None = None
+    cancel_event: threading.Event | None = None
+    request_key = req.request_id or uuid.uuid4().hex
     try:
         session = SESSIONS.get_or_create(req.session_id)
 
-        # 同一个会话串行处理，避免两条追问同时读到同一份旧上下文
+        # 只在校验和取上下文时短暂持锁，模型调用期间不占用会话锁。
+        # 这样用户点“停止”后可以立刻追问，旧请求也不会再把结果写回来。
         if not session.lock.acquire(timeout=0.5):
             raise HTTPException(
                 status_code=409,
                 detail="该会话正在处理上一条消息，请稍后再试。",
             )
-
         try:
+            if not SESSIONS.begin_request(session, request_key):
+                raise HTTPException(
+                    status_code=409,
+                    detail="该会话正在处理上一条消息，请稍后再试。",
+                )
             history = SESSIONS.history_for(session)
             follow_up = bool(history)
             turn = len(session.turns) + 1
-
-            trace_path = new_trace_file(TRACE_DIR, prefix="web")
-            tracer = TraceRecorder(
-                case_id=f"web-{session.id[:8]}-t{turn}",
-                question=question,
-                path=trace_path,
-            )
-
-            # 题库没构建时不开检索工具，避免每轮都拿到“题库不存在”的工具错误
-            retrieval = index_available()
-
-            start = time.perf_counter()
-            try:
-                answer = Agent(client=get_client(), retrieval=retrieval).run(
-                    question,
-                    trace=tracer,
-                    history=history,
-                    cancel_event=cancel_event,
-                )
-            except Exception as e:  # 单题失败不拖垮服务
-                answer = f"错误：求解失败（{type(e).__name__}: {e}）"
-                tracer.add("error", kind="agent_exception", message=answer)
-            elapsed = time.perf_counter() - start
-            cancelled = cancel_event is not None and cancel_event.is_set()
-            if cancelled:
-                answer = CANCELLED_MESSAGE
-
-            tracer.finish(
-                request_elapsed=round(elapsed, 4),
-                session_id=session.id,
-                turn=turn,
-                follow_up=follow_up,
-                history_messages=len(history),
-                history_chars=sum(len(m["content"]) for m in history),
-            )
-
-            # 列真题不是解题，不要把正文里的数字误当成最终答案
-            paper = None if cancelled else (
-                collect_paper(tracer.events) if retrieval else None
-            )
-            allow_answer_fallback = (
-                not follow_up
-                and paper is None
-                and not asks_for_more_info(answer)
-            )
-            final_answer = extract_final_answer(
-                answer,
-                allow_fallback=allow_answer_fallback,
-            )
-            final_answer_display = extract_final_answer_display(
-                normalize_math_delimiters(answer),
-                allow_fallback=allow_answer_fallback,
-            )
-            error = tracer.error
-            if cancelled:
-                error = CANCELLED_MESSAGE
-            elif error is None and answer.startswith("错误："):
-                error = answer
-
-            display_answer = strip_answer_marker(
-                normalize_math_delimiters(answer)
-            )
-            solution = parse_solution(display_answer)
-
-            turn_id = None
-            if error is None:
-                turn_id = SESSIONS.append_turn(session, question, answer)
-
-            return AskResponse(
-                answer=answer,
-                display_answer=display_answer,
-                session_id=session.id,
-                turn_id=turn_id,
-                turn=turn,
-                follow_up=follow_up,
-                final_answer=final_answer,
-                final_answer_display=final_answer_display,
-                error=error,
-                elapsed=round(elapsed, 2),
-                llm_calls=tracer.llm_calls,
-                tool_calls=tracer.tool_calls,
-                tool_errors=tracer.tool_errors,
-                tokens=tracer.usage["total_tokens"],
-                trace_file=trace_path.name,
-                steps=collect_steps(tracer.events),
-                tools=collect_tools(tracer.events),
-                related_problems=[] if paper else collect_related(
-                    tracer.events,
-                    question,
-                    enabled=retrieval,
-                    follow_up=follow_up,
-                ),
-                paper=paper,
-                solution=solution,
-            )
         finally:
             session.lock.release()
+
+        cancel_event = register_cancel(req.request_id, owner=session)
+
+        trace_path = new_trace_file(TRACE_DIR, prefix="web")
+        tracer = TraceRecorder(
+            case_id=f"web-{session.id[:8]}-t{turn}",
+            question=question,
+            path=trace_path,
+        )
+
+        # 题库没构建时不开检索工具，避免每轮都拿到“题库不存在”的工具错误
+        retrieval = index_available()
+
+        start = time.perf_counter()
+        try:
+            answer = Agent(client=get_client(), retrieval=retrieval).run(
+                question,
+                trace=tracer,
+                history=history,
+                cancel_event=cancel_event,
+            )
+        except Exception as e:  # 单题失败不拖垮服务
+            answer = f"错误：求解失败（{type(e).__name__}: {e}）"
+            tracer.add("error", kind="agent_exception", message=answer)
+        elapsed = time.perf_counter() - start
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        if cancelled:
+            answer = CANCELLED_MESSAGE
+
+        tracer.finish(
+            request_elapsed=round(elapsed, 4),
+            session_id=session.id,
+            turn=turn,
+            follow_up=follow_up,
+            history_messages=len(history),
+            history_chars=sum(len(m["content"]) for m in history),
+        )
+
+        # 列真题不是解题，不要把正文里的数字误当成最终答案
+        paper = None if cancelled else (
+            collect_paper(tracer.events) if retrieval else None
+        )
+        allow_answer_fallback = (
+            not follow_up
+            and paper is None
+            and not asks_for_more_info(answer)
+        )
+        final_answer = extract_final_answer(
+            answer,
+            allow_fallback=allow_answer_fallback,
+        )
+        final_answer_display = extract_final_answer_display(
+            normalize_math_delimiters(answer),
+            allow_fallback=allow_answer_fallback,
+        )
+        error = tracer.error
+        if cancelled:
+            error = CANCELLED_MESSAGE
+        elif error is None and answer.startswith("错误："):
+            error = answer
+
+        display_answer = strip_answer_marker(
+            normalize_math_delimiters(answer)
+        )
+        solution = parse_solution(display_answer)
+
+        turn_id = None
+        with session.lock:
+            # 取消或“新对话”可能已经把这次请求踢掉；只有仍持有会话的
+            # 请求才能追加回答，避免停止后旧结果污染下一轮上下文。
+            still_owner = SESSIONS.end_request(session, request_key)
+            if still_owner and error is None:
+                if cancel_event is None or not cancel_event.is_set():
+                    turn_id = SESSIONS.append_turn(session, question, answer)
+
+        return AskResponse(
+            answer=answer,
+            display_answer=display_answer,
+            session_id=session.id,
+            turn_id=turn_id,
+            turn=turn,
+            follow_up=follow_up,
+            final_answer=final_answer,
+            final_answer_display=final_answer_display,
+            error=error,
+            elapsed=round(elapsed, 2),
+            llm_calls=tracer.llm_calls,
+            tool_calls=tracer.tool_calls,
+            tool_errors=tracer.tool_errors,
+            tokens=tracer.usage["total_tokens"],
+            trace_file=trace_path.name,
+            steps=collect_steps(tracer.events),
+            tools=collect_tools(tracer.events),
+            related_problems=[] if paper else collect_related(
+                tracer.events,
+                question,
+                enabled=retrieval,
+                follow_up=follow_up,
+            ),
+            paper=paper,
+            solution=solution,
+        )
     finally:
+        if session is not None:
+            with session.lock:
+                SESSIONS.end_request(session, request_key)
         drop_cancel(req.request_id, cancel_event)
         _slots.release()
 
@@ -1101,7 +1224,9 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
     if not _slots.acquire(timeout=0.5):
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
-    cancel_event = register_cancel(req.request_id)
+    thread: Session | None = None
+    cancel_event: threading.Event | None = None
+    request_key = req.request_id or uuid.uuid4().hex
     try:
         parent = SESSIONS.get(req.parent_session_id)
         if parent is None:
@@ -1161,8 +1286,12 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
                 status_code=409,
                 detail="这个步骤追问正在处理上一条消息，请稍后再试。",
             )
-
         try:
+            if not STEP_SESSIONS.begin_request(thread, request_key):
+                raise HTTPException(
+                    status_code=409,
+                    detail="这个步骤追问正在处理上一条消息，请稍后再试。",
+                )
             if not thread.turns:
                 STEP_SESSIONS.append_turn(
                     thread,
@@ -1176,72 +1305,80 @@ def ask_step(req: StepAskRequest) -> StepAskResponse:
 
             history = STEP_SESSIONS.history_for(thread)
             turn = max(1, len(thread.turns))
-
-            trace_path = new_trace_file(TRACE_DIR, prefix="step")
-            tracer = TraceRecorder(
-                case_id=f"step-{thread.id[:8]}-t{turn}",
-                question=step_question,
-                path=trace_path,
-            )
-
-            start = time.perf_counter()
-            try:
-                # 侧栏只解释步骤，不需要再检索题库，避免无关结果干扰。
-                answer = Agent(client=get_client(), retrieval=False).run(
-                    step_question,
-                    trace=tracer,
-                    history=history,
-                    cancel_event=cancel_event,
-                )
-            except Exception as e:
-                answer = f"错误：求解失败（{type(e).__name__}: {e}）"
-                tracer.add("error", kind="agent_exception", message=answer)
-            elapsed = time.perf_counter() - start
-            cancelled = cancel_event is not None and cancel_event.is_set()
-            if cancelled:
-                answer = CANCELLED_MESSAGE
-
-            tracer.finish(
-                request_elapsed=round(elapsed, 4),
-                session_id=thread.id,
-                turn=turn,
-                scope="step",
-                history_messages=len(history),
-                history_chars=sum(len(m["content"]) for m in history),
-            )
-
-            error = tracer.error
-            if cancelled:
-                error = CANCELLED_MESSAGE
-            elif error is None and answer.startswith("错误："):
-                error = answer
-
-            if error is None:
-                # 只写侧栏会话；主 SESSIONS 完全不动。
-                STEP_SESSIONS.append_turn(thread, step_question, answer)
-
-            return StepAskResponse(
-                answer=answer,
-                display_answer=strip_answer_marker(
-                    normalize_math_delimiters(answer)
-                ),
-                step_session_id=thread.id,
-                step_index=req.step_index,
-                step_label=step_label,
-                turn=turn,
-                error=error,
-                elapsed=round(elapsed, 2),
-                llm_calls=tracer.llm_calls,
-                tool_calls=tracer.tool_calls,
-                tool_errors=tracer.tool_errors,
-                tokens=tracer.usage["total_tokens"],
-                trace_file=trace_path.name,
-                steps=collect_steps(tracer.events),
-                tools=collect_tools(tracer.events),
-            )
         finally:
             thread.lock.release()
+
+        cancel_event = register_cancel(req.request_id, owner=thread)
+
+        trace_path = new_trace_file(TRACE_DIR, prefix="step")
+        tracer = TraceRecorder(
+            case_id=f"step-{thread.id[:8]}-t{turn}",
+            question=step_question,
+            path=trace_path,
+        )
+
+        start = time.perf_counter()
+        try:
+            # 侧栏只解释步骤，不需要再检索题库，避免无关结果干扰。
+            answer = Agent(client=get_client(), retrieval=False).run(
+                step_question,
+                trace=tracer,
+                history=history,
+                cancel_event=cancel_event,
+            )
+        except Exception as e:
+            answer = f"错误：求解失败（{type(e).__name__}: {e}）"
+            tracer.add("error", kind="agent_exception", message=answer)
+        elapsed = time.perf_counter() - start
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        if cancelled:
+            answer = CANCELLED_MESSAGE
+
+        tracer.finish(
+            request_elapsed=round(elapsed, 4),
+            session_id=thread.id,
+            turn=turn,
+            scope="step",
+            history_messages=len(history),
+            history_chars=sum(len(m["content"]) for m in history),
+        )
+
+        error = tracer.error
+        if cancelled:
+            error = CANCELLED_MESSAGE
+        elif error is None and answer.startswith("错误："):
+            error = answer
+
+        with thread.lock:
+            # 只写侧栏会话；主 SESSIONS 完全不动。取消后不再追加。
+            still_owner = STEP_SESSIONS.end_request(thread, request_key)
+            if still_owner and error is None:
+                if cancel_event is None or not cancel_event.is_set():
+                    STEP_SESSIONS.append_turn(thread, step_question, answer)
+
+        return StepAskResponse(
+            answer=answer,
+            display_answer=strip_answer_marker(
+                normalize_math_delimiters(answer)
+            ),
+            step_session_id=thread.id,
+            step_index=req.step_index,
+            step_label=step_label,
+            turn=turn,
+            error=error,
+            elapsed=round(elapsed, 2),
+            llm_calls=tracer.llm_calls,
+            tool_calls=tracer.tool_calls,
+            tool_errors=tracer.tool_errors,
+            tokens=tracer.usage["total_tokens"],
+            trace_file=trace_path.name,
+            steps=collect_steps(tracer.events),
+            tools=collect_tools(tracer.events),
+        )
     finally:
+        if thread is not None:
+            with thread.lock:
+                STEP_SESSIONS.end_request(thread, request_key)
         drop_cancel(req.request_id, cancel_event)
         _slots.release()
 

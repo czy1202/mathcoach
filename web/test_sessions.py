@@ -1,5 +1,7 @@
 """多轮会话存储的单元测试。"""
 
+import time
+
 from web.sessions import SESSION_ID_RE, SessionStore, truncate_middle
 
 
@@ -142,3 +144,102 @@ def test_long_assistant_answer_is_truncated_in_history():
 
     assert len(history[1]["content"]) <= 200
     assert "最终答案：42" in history[1]["content"]
+
+
+# ---------- 请求占用与取消 ----------
+
+def test_begin_request_blocks_second_request_until_end():
+    store = SessionStore()
+    session = store.get_or_create()
+
+    assert store.begin_request(session, "req-a") is True
+    assert store.begin_request(session, "req-b") is False
+    assert store.end_request(session, "req-a") is True
+    assert store.end_request(session, "req-a") is False
+    assert store.begin_request(session, "req-b") is True
+
+
+def test_reset_closes_session_and_rejects_appends():
+    store = SessionStore()
+    session = store.get_or_create()
+
+    assert store.reset(session.id) is True
+    assert session.closed is True
+    try:
+        store.append_turn(session, "q", "a")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("已删除的会话不应继续追加回答")
+
+
+# ---------- SQLite 持久化 ----------
+
+def test_sessions_survive_store_reload(tmp_path):
+    path = tmp_path / "sessions.db"
+    store = SessionStore(persist_path=path)
+    session = store.get_or_create()
+    turn_id = store.append_turn(session, "原题", "原答案")
+
+    reloaded = SessionStore(persist_path=path)
+    restored = reloaded.get(session.id)
+
+    assert restored is not None
+    assert restored.original_question == "原题"
+    assert restored.turns == [{
+        "id": turn_id,
+        "question": "原题",
+        "answer": "原答案",
+    }]
+    assert reloaded.history_for(restored) == [
+        {"role": "user", "content": "原题"},
+        {"role": "assistant", "content": "原答案"},
+    ]
+
+
+def test_reset_is_persisted(tmp_path):
+    path = tmp_path / "sessions.db"
+    store = SessionStore(persist_path=path)
+    session = store.get_or_create()
+    store.append_turn(session, "q", "a")
+
+    store.reset(session.id)
+
+    reloaded = SessionStore(persist_path=path)
+    assert reloaded.get(session.id) is None
+    assert reloaded.size() == 0
+
+
+def test_persistence_namespaces_are_isolated(tmp_path):
+    path = tmp_path / "sessions.db"
+    main = SessionStore(persist_path=path, namespace="main")
+    step = SessionStore(persist_path=path, namespace="step")
+    main_session = main.get_or_create()
+    step_session = step.get_or_create()
+
+    reloaded_main = SessionStore(persist_path=path, namespace="main")
+    reloaded_step = SessionStore(persist_path=path, namespace="step")
+
+    assert reloaded_main.get(main_session.id) is not None
+    assert reloaded_main.get(step_session.id) is None
+    assert reloaded_step.get(step_session.id) is not None
+    assert reloaded_step.get(main_session.id) is None
+
+
+def test_expired_sessions_are_not_reloaded(tmp_path):
+    path = tmp_path / "sessions.db"
+    store = SessionStore(persist_path=path, ttl_seconds=0)
+    session = store.get_or_create()
+    store.append_turn(session, "q", "a")
+    time.sleep(0.01)
+
+    reloaded = SessionStore(persist_path=path, ttl_seconds=0)
+
+    assert reloaded.get(session.id) is None
+
+
+def test_memory_store_does_not_create_database(tmp_path):
+    path = tmp_path / "sessions.db"
+    SessionStore().get_or_create()
+
+    assert not path.exists()
