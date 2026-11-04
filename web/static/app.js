@@ -22,6 +22,7 @@
   const stepPanel = document.getElementById("step-panel");
   const stepBackdrop = document.getElementById("step-backdrop");
   const stepClose = document.getElementById("step-close");
+  const stepNewChat = document.getElementById("step-new-chat");
   const stepTitle = document.getElementById("step-panel-title");
   const stepQuote = document.getElementById("step-quote");
   const stepThread = document.getElementById("step-thread");
@@ -838,6 +839,7 @@
     renderStepMessages(state);
     stepInput.disabled = state.busy;
     stepSend.disabled = state.busy;
+    if (stepNewChat) stepNewChat.disabled = state.busy;
     stepInput.placeholder = state.busy
       ? "正在回答…"
       : `针对${state.stepLabel}提问，例如：这里为什么成立？`;
@@ -871,6 +873,19 @@
   function resizeStepInput() {
     stepInput.style.height = "auto";
     stepInput.style.height = `${Math.min(stepInput.scrollHeight, 120)}px`;
+  }
+
+  // 只重置当前这一步的追问会话，不关闭侧栏，也不影响主对话。
+  function resetStepConversation() {
+    const state = activeStepKey ? stepThreads.get(activeStepKey) : null;
+    if (!state || state.busy) return;
+
+    state.messages = [];
+    state.threadSessionId = null;
+    stepInput.value = "";
+    resizeStepInput();
+    renderStepPanel(state);
+    stepInput.focus();
   }
 
   async function submitStepQuestion() {
@@ -1975,6 +1990,10 @@
 
   if (stepClose) {
     stepClose.addEventListener("click", () => closeStepPanel());
+  }
+
+  if (stepNewChat) {
+    stepNewChat.addEventListener("click", resetStepConversation);
   }
 
   if (stepBackdrop) {

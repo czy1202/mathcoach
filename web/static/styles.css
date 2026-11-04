@@ -1913,6 +1913,37 @@ textarea {
   line-height: 1.4;
 }
 
+.step-head-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.step-new-chat {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+
+.step-new-chat:hover:not(:disabled) {
+  border-color: #c7d2fe;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
+.step-new-chat:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .step-close {
   display: grid;
   place-items: center;
