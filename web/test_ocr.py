@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 
 import ocr
 import web.app as web_app
+from llm import LLMResponse
 
 
 client = TestClient(web_app.app)
@@ -165,3 +166,103 @@ def test_ocr_rejects_concurrent_upload(configured, monkeypatch):
     response = upload()
 
     assert response.status_code == 429
+
+
+# ---------- 二次校对接口 ----------
+
+class FakeFixClient:
+    def __init__(self, content="", error=None):
+        self.content = content
+        self.error = error
+        self.messages = None
+
+    def chat(self, messages, tools=None):
+        self.messages = messages
+        if self.error is not None:
+            raise self.error
+        return LLMResponse(content=self.content)
+
+
+def fix(payload):
+    return client.post("/api/ocr/fix", json=payload)
+
+
+def test_ocr_fix_returns_corrected_text(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    fake = FakeFixClient("设 $x^{3}$，求 $\\sqrt[3]{x}$。")
+    monkeypatch.setattr(web_app, "get_client", lambda: fake)
+
+    response = fix({
+        "text": "设 $x^{2}$，求 $\\sqrt{x}$。",
+        "instruction": "指数应该是 3，不是 2",
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["text"] == "设 $x^{3}$，求 $\\sqrt[3]{x}$。"
+    assert data["truncated"] is False
+    assert "原识别结果" in fake.messages[1]["content"]
+    assert "指数应该是 3" in fake.messages[1]["content"]
+
+
+def test_ocr_fix_strips_code_fence_and_prefix(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    fake = FakeFixClient("```markdown\n修正后的题目：$x^2$\n```")
+    monkeypatch.setattr(web_app, "get_client", lambda: fake)
+
+    response = fix({"text": "$x^2$", "instruction": "保持原样"})
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "$x^2$"
+
+
+def test_ocr_fix_requires_api_key(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+
+    response = fix({"text": "$x^2$", "instruction": "保持原样"})
+
+    assert response.status_code == 503
+    assert "API Key" in response.json()["detail"]
+
+
+def test_ocr_fix_rejects_empty_instruction(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+
+    response = fix({"text": "$x^2$", "instruction": "   "})
+
+    assert response.status_code == 400
+    assert "哪里识别错" in response.json()["detail"]
+
+
+def test_ocr_fix_rejects_empty_model_output(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    fake = FakeFixClient("   ")
+    monkeypatch.setattr(web_app, "get_client", lambda: fake)
+
+    response = fix({"text": "$x^2$", "instruction": "保持原样"})
+
+    assert response.status_code == 502
+
+
+def test_ocr_fix_maps_model_failure_to_502(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    fake = FakeFixClient(error=RuntimeError("上游超时"))
+    monkeypatch.setattr(web_app, "get_client", lambda: fake)
+
+    response = fix({"text": "$x^2$", "instruction": "保持原样"})
+
+    assert response.status_code == 502
+    assert "上游超时" in response.json()["detail"]
+
+
+def test_ocr_fix_truncates_long_output(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "test-key")
+    fake = FakeFixClient("题" * (web_app.MAX_QUESTION_CHARS + 10))
+    monkeypatch.setattr(web_app, "get_client", lambda: fake)
+
+    response = fix({"text": "$x^2$", "instruction": "补全题目"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["truncated"] is True
+    assert len(data["text"]) == web_app.MAX_QUESTION_CHARS

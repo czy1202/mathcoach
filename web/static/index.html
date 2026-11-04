@@ -7,7 +7,7 @@
   <title>mathcoach · 数学竞赛解题助手</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%234f46e5'/%3E%3Ctext x='32' y='46' font-size='40' text-anchor='middle' fill='white'%3E%E2%88%91%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/vendor/katex/katex.min.css">
-  <link rel="stylesheet" href="/static/styles.css?v=20261103">
+  <link rel="stylesheet" href="/static/styles.css?v=20261104-2">
 </head>
 <body>
   <div class="page">
@@ -99,7 +99,7 @@
       <div class="ocr-preview" id="ocr-preview" hidden>
         <div class="ocr-preview-head">
           <span class="ocr-preview-title">已识别题目</span>
-          <span class="ocr-preview-tip">点击公式可单独修改；核对无误后直接发送</span>
+          <span class="ocr-preview-tip">公式可点开单改；说不清就用下方大白话纠错</span>
           <div class="ocr-preview-actions">
             <button type="button" class="ocr-tool-btn" id="ocr-source-toggle">编辑源码</button>
             <button type="button" class="ocr-tool-btn" id="ocr-retry">重新识别</button>
@@ -113,6 +113,21 @@
           <div class="ocr-preview-main">
             <div class="content ocr-preview-body" id="ocr-preview-body"></div>
             <div class="ocr-source-editor" id="ocr-source-editor" hidden>
+              <div class="ocr-source-guide">
+                <p class="ocr-source-guide-title">源码和公式的对应关系</p>
+                <div class="ocr-formula-map" id="ocr-formula-map"></div>
+                <details class="ocr-source-help">
+                  <summary>源码小抄：分数、根号、上下标怎么写</summary>
+                  <ul>
+                    <li><code>\frac{a}{b}</code> 是分数 <span class="guide-math" data-tex="\frac{a}{b}"></span>，把 a、b 换成题目里的数。</li>
+                    <li><code>\sqrt{x}</code> 是平方根 <span class="guide-math" data-tex="\sqrt{x}"></span>；<code>\sqrt[3]{x}</code> 是三次根 <span class="guide-math" data-tex="\sqrt[3]{x}"></span>。</li>
+                    <li><code>x^{2}</code> 是上标 <span class="guide-math" data-tex="x^{2}"></span>；<code>a_{n}</code> 是下标 <span class="guide-math" data-tex="a_{n}"></span>。</li>
+                    <li><code>\le</code> 是 ≤，<code>\ge</code> 是 ≥，<code>\pi</code> 是 π。</li>
+                    <li>只改数字和字母；不要删掉 <code>$</code>、反斜杠 <code>\</code> 和花括号 <code>{ }</code>。</li>
+                  </ul>
+                </details>
+                <p class="ocr-source-tip">下面每个小框是题目里已经排好的公式，右边是它在源码中的写法。对照着改最不容易错。</p>
+              </div>
               <textarea
                 id="ocr-source"
                 rows="6"
@@ -121,13 +136,26 @@
                 aria-label="识别结果源码"
               ></textarea>
               <div class="ocr-source-actions">
-                <span class="ocr-source-hint">源码模式：公式使用 $...$，改完点“完成”。</span>
+                <span class="ocr-source-hint">公式用 $...$ 包起来，改完点“完成”。</span>
                 <button type="button" class="ocr-tool-btn" id="ocr-source-cancel">取消</button>
                 <button type="button" class="ocr-source-save" id="ocr-source-save">完成</button>
               </div>
             </div>
           </div>
         </div>
+        <form class="ocr-correct-form" id="ocr-correct-form" autocomplete="off" hidden>
+          <div class="ocr-correct-row">
+            <input
+              type="text"
+              id="ocr-correct-input"
+              maxlength="500"
+              placeholder="识别有误？用大白话说，例如：根号应为三次根"
+              aria-label="用大白话说明识别错误"
+            >
+            <button type="submit" class="ocr-correct-submit" id="ocr-correct-submit">AI 修正</button>
+          </div>
+          <p class="ocr-correct-hint">会带着原题再校对一次，只改题干，不会开始解题。</p>
+        </form>
       </div>
       <div class="ocr-status" id="ocr-status" hidden role="status" aria-live="polite">
         <span class="ocr-spinner" id="ocr-spinner" aria-hidden="true"></span>
@@ -226,6 +254,6 @@
   <script src="/static/vendor/katex/katex.min.js"></script>
   <script src="/static/vendor/marked/marked.umd.js"></script>
   <script src="/static/vendor/dompurify/purify.min.js"></script>
-  <script src="/static/app.js?v=20261103"></script>
+  <script src="/static/app.js?v=20261104-2"></script>
 </body>
 </html>

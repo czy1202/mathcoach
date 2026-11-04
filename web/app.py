@@ -48,6 +48,35 @@ TRACE_DIR = BASE_DIR.parent / "traces"
 MAX_QUESTION_CHARS = 5000
 MAX_CONCURRENT = 2          # 本地演示，同时最多跑两道题，避免并发烧额度
 
+# OCR 二次校对：只修题干，不解题。输出长度仍以题目上限封顶。
+_OCR_FIX_SYSTEM_PROMPT = """\
+你是数学题目 OCR 校对助手。用户会给你一段从图片识别出的题目 Markdown，\
+以及一句大白话纠错说明。
+
+只按纠错说明修正题干中的文字和 LaTeX，保持题意、题号、顺序和原有内容不变。
+必须遵守：
+1. 只输出修正后的完整题干，不要解释、不要前言后语、不要 Markdown 代码围栏。
+2. 行内公式写成 $...$，独立公式写成 $$...$$；不要在美元符号前加反斜杠。
+3. 公式内部不要换行，不要保留 $ 后和 $ 前的多余空格。
+4. 不要添加原识别结果中没有的条件、数字或结论；不确定时保持原样。
+5. 用户指出一处错误时只改那一处，其余内容原样输出；绝对不要开始解题。
+"""
+
+_FIX_PREFIX_RE = re.compile(
+    r"^\s*(?:修正后(?:的)?(?:题目|题干|结果)|修正结果|题目|题干|结果)\s*[:：]\s*"
+)
+
+
+def clean_ocr_fix(text: str) -> str:
+    """去掉模型偶尔包上的代码围栏或“修正后的题目：”前缀。"""
+    cleaned = str(text or "").strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if len(lines) >= 2 and lines[-1].strip() == "```":
+            cleaned = "\n".join(lines[1:-1]).strip()
+    return _FIX_PREFIX_RE.sub("", cleaned).strip()
+
+
 # 匹配单独一行的答案标记，用于从展示文本里去掉它
 _ANSWER_LINE_RE = re.compile(
     r"(?m)^\s*(?:\*\*|__)?\s*(?:最终\s*答案|答案|final\s*answer|answer)"
@@ -147,6 +176,19 @@ class OcrResponse(BaseModel):
     text: str
     mode: str = ""
     confidence: float | None = None
+
+
+class OcrFixRequest(BaseModel):
+    """用户用大白话指出识别错误后的二次校对请求。"""
+
+    text: str = Field(..., min_length=1, max_length=MAX_QUESTION_CHARS)
+    instruction: str = Field(..., min_length=1, max_length=500)
+
+
+class OcrFixResponse(BaseModel):
+    text: str
+    elapsed: float = 0.0
+    truncated: bool = False
 
 
 class StepAskRequest(BaseModel):
@@ -667,7 +709,7 @@ def health() -> dict:
 def recognize_image(file: UploadFile = File(...)) -> OcrResponse:
     """把题目截图识别成可编辑文本。
 
-    只做识别，不调用解题模型，也不自动提交。识别结果由前端填进输入框，
+    只做识别，不调用解题模型，也不自动提交。识别结果由前端生成题目卡，
     用户核对公式和题号后再自己点发送。
     """
     if not ocr.is_configured():
@@ -726,6 +768,70 @@ def recognize_image(file: UploadFile = File(...)) -> OcrResponse:
         text=result.text,
         mode=result.mode,
         confidence=result.confidence,
+    )
+
+
+@app.post("/api/ocr/fix", response_model=OcrFixResponse)
+def fix_ocr_text(payload: OcrFixRequest) -> OcrFixResponse:
+    """带着原识别结果和用户的纠错说明，让模型做一轮题干校对。
+
+    只返回修正后的题干；不写入会话、不触发解题。
+    """
+    if not config.OPENAI_API_KEY.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未配置解题模型 API Key，无法进行二次校对。",
+        )
+
+    text = payload.text.strip()
+    instruction = payload.instruction.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="识别结果为空，无法校对。")
+    if not instruction:
+        raise HTTPException(status_code=400, detail="请先用一句话说明哪里识别错了。")
+
+    # 和解题共用并发额度，避免用户连续点“AI 修正”打满上游。
+    if not _slots.acquire(timeout=0.5):
+        raise HTTPException(
+            status_code=429,
+            detail="模型正忙，请等当前请求结束后再试。",
+        )
+
+    started = time.perf_counter()
+    try:
+        response = get_client().chat([
+            {"role": "system", "content": _OCR_FIX_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": (
+                    "原识别结果：\n"
+                    f"{text}\n\n"
+                    f"用户纠错说明：{instruction}"
+                ),
+            },
+        ])
+        corrected = clean_ocr_fix(response.content)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"题目修正失败：{exc}",
+        ) from exc
+    finally:
+        _slots.release()
+
+    if not corrected:
+        raise HTTPException(
+            status_code=502,
+            detail="模型没有返回修正后的题目，请换个说法再试。",
+        )
+
+    truncated = len(corrected) > MAX_QUESTION_CHARS
+    return OcrFixResponse(
+        text=corrected[:MAX_QUESTION_CHARS],
+        elapsed=round(time.perf_counter() - started, 3),
+        truncated=truncated,
     )
 
 

@@ -44,6 +44,10 @@
   const ocrSource = document.getElementById("ocr-source");
   const ocrSourceSave = document.getElementById("ocr-source-save");
   const ocrSourceCancel = document.getElementById("ocr-source-cancel");
+  const ocrFormulaMap = document.getElementById("ocr-formula-map");
+  const ocrCorrectForm = document.getElementById("ocr-correct-form");
+  const ocrCorrectInput = document.getElementById("ocr-correct-input");
+  const ocrCorrectSubmit = document.getElementById("ocr-correct-submit");
   const formulaBackdrop = document.getElementById("formula-backdrop");
   const formulaPanel = document.getElementById("formula-panel");
   const formulaPreview = document.getElementById("formula-preview");
@@ -60,6 +64,9 @@
   const OCR_PAGE_AREA = 1500000;
   let busy = false;
   let ocrBusy = false;
+  let ocrFixBusy = false;
+  let ocrFixRequestId = 0;
+  let ocrFixAbort = null;
   let ocrProvider = "ollama";
   let ocrStatusTimer = null;
   let ocrImageUrl = null;
@@ -222,6 +229,40 @@
     return formulas;
   }
 
+  // OCR 模型偶尔会输出 \ $...\ $、$ x^2 $，或在公式中间换行；
+  // 这些写法会让 protectMath 认不出公式，用户就会看到源码。
+  // 这里只做保守修复：先把转义的美元符号还原，再压平公式内部换行。
+  function cleanOcrFormulaBody(body) {
+    let clean = body.replace(/\s*\n\s*/g, " ").trim();
+    let trailing = "";
+    const punctuation = clean.match(/[。，、；：！？]+$/);
+    if (punctuation) {
+      trailing = punctuation[0];
+      clean = clean.slice(0, -trailing.length).trim();
+    }
+    return { body: clean, trailing };
+  }
+
+  function normalizeOcrMath(text) {
+    let result = String(text || "")
+      .replace(/\\\$/g, "$")
+      .replace(/＄/g, "$");
+
+    result = result.replace(/\$\$([\s\S]*?)\$\$/g, (match, body) => {
+      const clean = cleanOcrFormulaBody(body);
+      return clean.body ? `$$${clean.body}$$${clean.trailing}` : match;
+    });
+
+    return result.replace(
+      /(?<!\$)\$(?!\$)([^$]*?)\$(?!\$)/g,
+      (match, body) => {
+        if (!/[\\^_{}=+*/<>-]/.test(body)) return match;
+        const clean = cleanOcrFormulaBody(body);
+        return clean.body ? `$${clean.body}$${clean.trailing}` : match;
+      },
+    );
+  }
+
   function renderDraftMarkdown(text) {
     if (!text) return "";
     if (!marked) return `<pre class="fallback">${escapeHtml(text)}</pre>`;
@@ -271,6 +312,25 @@
     return window.DOMPurify.sanitize(html, {
       USE_PROFILES: { html: true, mathMl: true },
     });
+  }
+
+  // 步骤标题是单行文本，不能套 renderMarkdown 的 <p>；用 parseInline
+  // 渲染其中的 $...$ 行内公式，标题里的 A_n、\sqrt n 才不会露出源码。
+  function renderInlineMarkdown(text) {
+    if (!text) return "";
+    if (!marked) return escapeHtml(text);
+    try {
+      const result = protectMath(text);
+      const html = marked.parseInline(result.text, {
+        gfm: true,
+        breaks: false,
+        async: false,
+      });
+      return restoreMath(sanitize(html), result.store);
+    } catch (err) {
+      console.error("行内 Markdown 渲染失败", err);
+      return escapeHtml(text);
+    }
   }
 
   function renderMarkdown(text) {
@@ -541,7 +601,7 @@
       if (step.title) {
         const title = document.createElement("div");
         title.className = "solution-step-title";
-        title.textContent = step.title;
+        title.innerHTML = renderInlineMarkdown(step.title);
         head.appendChild(title);
       }
 
@@ -708,9 +768,9 @@
 
     const title = document.createElement("div");
     title.className = "step-quote-title";
-    title.textContent = state.stepTitle
-      ? `${state.stepLabel} · ${state.stepTitle}`
-      : state.stepLabel;
+    title.innerHTML = state.stepTitle
+      ? `${escapeHtml(state.stepLabel)} · ${renderInlineMarkdown(state.stepTitle)}`
+      : escapeHtml(state.stepLabel);
     stepQuote.appendChild(title);
 
     const body = document.createElement("div");
@@ -771,9 +831,9 @@
   }
 
   function renderStepPanel(state) {
-    stepTitle.textContent = state.stepTitle
-      ? `${state.stepLabel} · ${state.stepTitle}`
-      : state.stepLabel;
+    stepTitle.innerHTML = state.stepTitle
+      ? `${escapeHtml(state.stepLabel)} · ${renderInlineMarkdown(state.stepTitle)}`
+      : escapeHtml(state.stepLabel);
     renderStepQuote(state);
     renderStepMessages(state);
     stepInput.disabled = state.busy;
@@ -1193,16 +1253,23 @@
   }
 
   function updateControls() {
-    // 识别期间不允许发送，避免 OCR 结果晚到后插进已经发出的问题里
-    sendBtn.disabled = busy || ocrBusy;
+    // 识别/二次校对期间不允许发送，避免旧题目晚到后插进已经发出的问题里
+    sendBtn.disabled = busy || ocrBusy || ocrFixBusy;
     newChatBtn.disabled = busy;
     input.disabled = busy;
-    if (ocrBtn) ocrBtn.disabled = busy || ocrBusy;
+    if (ocrBtn) ocrBtn.disabled = busy || ocrBusy || ocrFixBusy;
     if (homeBtn) homeBtn.disabled = busy;
     if (ocrSourceToggle) {
-      ocrSourceToggle.disabled = busy || ocrBusy || !ocrDraft;
+      ocrSourceToggle.disabled = busy || ocrBusy || ocrFixBusy || !ocrDraft;
     }
-    if (ocrRetry) ocrRetry.disabled = busy || ocrBusy || !ocrDraft;
+    if (ocrRetry) ocrRetry.disabled = busy || ocrBusy || ocrFixBusy || !ocrDraft;
+    if (ocrCorrectInput) {
+      ocrCorrectInput.disabled = busy || ocrBusy || ocrFixBusy;
+    }
+    if (ocrCorrectSubmit) {
+      ocrCorrectSubmit.disabled = busy || ocrBusy || ocrFixBusy;
+      ocrCorrectSubmit.textContent = ocrFixBusy ? "修正中…" : "AI 修正";
+    }
     sendBtn.querySelector(".send-label").textContent = busy ? "求解中" : "发送";
   }
 
@@ -1279,11 +1346,12 @@
     if (ocrSpinner) ocrSpinner.hidden = kind !== "loading";
     // 识别中按钮变成“取消”，成功提示过一会儿自动收起，错误保留给用户看
     if (ocrStatusClose) {
+      const loadingLabel = ocrFixBusy ? "取消修正" : "取消识别";
       ocrStatusClose.hidden = false;
-      ocrStatusClose.title = kind === "loading" ? "取消识别" : "关闭提示";
+      ocrStatusClose.title = kind === "loading" ? loadingLabel : "关闭提示";
       ocrStatusClose.setAttribute(
         "aria-label",
-        kind === "loading" ? "取消识别" : "关闭识别提示",
+        kind === "loading" ? loadingLabel : "关闭识别提示",
       );
     }
     if (kind === "ok") {
@@ -1320,6 +1388,7 @@
       ocrPreviewBody.innerHTML = "";
     }
     if (ocrSourceEditor) ocrSourceEditor.hidden = true;
+    if (ocrCorrectForm) ocrCorrectForm.hidden = true;
     if (ocrSourceToggle) ocrSourceToggle.textContent = "编辑源码";
     if (ocrPreviewClose) {
       ocrPreviewClose.title = "清除识别结果";
@@ -1329,6 +1398,14 @@
   }
 
   function clearOcrDraft() {
+    // 让在途的二次校对结果失效，避免清空后又被写回来
+    ocrFixRequestId += 1;
+    if (ocrFixAbort) {
+      ocrFixAbort.abort();
+      ocrFixAbort = null;
+    }
+    ocrFixBusy = false;
+    if (ocrCorrectInput) ocrCorrectInput.value = "";
     ocrDraft = "";
     resetInputPlaceholder();
     updateControls();
@@ -1354,6 +1431,20 @@
     }
   }
 
+  function cancelOcrFix() {
+    ocrFixRequestId += 1;
+    if (ocrFixAbort) {
+      ocrFixAbort.abort();
+      ocrFixAbort = null;
+    }
+    ocrFixBusy = false;
+    updateControls();
+    clearOcrStatus();
+    // 取消只丢掉这一轮校对，上一版题目卡继续保留。
+    if (ocrDraft) showOcrPreview();
+    else hideOcrPreview();
+  }
+
   function renderOcrPreview() {
     if (!ocrPreview || !ocrPreviewBody || !ocrDraft || ocrSourceOpen) return;
     ocrPreviewBody.hidden = false;
@@ -1370,6 +1461,7 @@
     ocrPreview.hidden = false;
     ocrSourceOpen = false;
     if (ocrSourceEditor) ocrSourceEditor.hidden = true;
+    if (ocrCorrectForm) ocrCorrectForm.hidden = false;
     if (ocrSourceToggle) ocrSourceToggle.textContent = "编辑源码";
     if (ocrPreviewClose) {
       ocrPreviewClose.title = "清除识别结果";
@@ -1384,6 +1476,7 @@
     ocrPreview.hidden = false;
     ocrSourceOpen = false;
     if (ocrSourceEditor) ocrSourceEditor.hidden = true;
+    if (ocrCorrectForm) ocrCorrectForm.hidden = true;
     if (ocrSourceToggle) ocrSourceToggle.textContent = "编辑源码";
     if (ocrPreviewClose) {
       ocrPreviewClose.title = "取消识别";
@@ -1415,7 +1508,7 @@
   function setOcrDraft(text, options = {}) {
     const focusInput = options.focusInput !== false;
     const limit = Number(input.maxLength) > 0 ? Number(input.maxLength) : 5000;
-    let next = String(text || "").trim();
+    let next = normalizeOcrMath(String(text || "")).trim();
     let truncated = false;
     if (next.length > limit) {
       next = next.slice(0, limit);
@@ -1440,10 +1533,43 @@
     return truncated;
   }
 
+  function renderOcrFormulaMap() {
+    if (!ocrFormulaMap) return;
+    ocrFormulaMap.replaceChildren();
+    const formulas = collectDraftMath(ocrDraft);
+    if (!formulas.length) {
+      const empty = document.createElement("p");
+      empty.className = "ocr-formula-map-empty";
+      empty.textContent = "没有检测到公式，可能整段都是普通文字。";
+      ocrFormulaMap.appendChild(empty);
+      return;
+    }
+    formulas.forEach((formula, index) => {
+      const row = document.createElement("div");
+      row.className = "ocr-map-row";
+
+      const label = document.createElement("span");
+      label.className = "ocr-map-label";
+      label.textContent = `公式 ${index + 1}`;
+
+      const preview = document.createElement("div");
+      preview.className = "ocr-map-preview";
+      preview.innerHTML = renderMath(formula.body, false);
+
+      const code = document.createElement("code");
+      code.className = "ocr-map-code";
+      code.textContent = `${formula.open}${formula.body}${formula.close}`;
+
+      row.append(label, preview, code);
+      ocrFormulaMap.appendChild(row);
+    });
+  }
+
   function openOcrSource() {
     if (!ocrDraft || !ocrSource || !ocrSourceEditor) return;
     ocrSourceOpen = true;
     ocrSource.value = ocrDraft;
+    renderOcrFormulaMap();
     ocrSourceEditor.hidden = false;
     if (ocrPreviewBody) ocrPreviewBody.hidden = true;
     if (ocrSourceToggle) ocrSourceToggle.textContent = "取消编辑";
@@ -1478,6 +1604,64 @@
     ocrSourceOpen = false;
     setOcrDraft(next);
     showOcrStatus("题目卡已更新，公式已重新排版。", "ok");
+  }
+
+  // 用户用大白话指出识别错误，再让模型带着原题校对一次。
+  // 这一步只返回修正后的题干，不会开始解题。
+  async function submitOcrCorrection() {
+    if (!ocrCorrectInput) return;
+    const instruction = ocrCorrectInput.value.trim();
+    if (!instruction || !ocrDraft || busy || ocrBusy || ocrFixBusy) return;
+
+    const draftAtStart = ocrDraft;
+    const requestId = ++ocrFixRequestId;
+    ocrFixBusy = true;
+    ocrFixAbort = new AbortController();
+    updateControls();
+    showOcrStatus("正在根据你的说明修正题目…", "loading");
+
+    try {
+      const response = await fetch("/api/ocr/fix", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: draftAtStart, instruction }),
+        signal: ocrFixAbort.signal,
+      });
+      const data = await response.json().catch(() => ({}));
+      if (requestId !== ocrFixRequestId) return;
+      if (!response.ok) {
+        throw new Error(errorText(data.detail, response.status));
+      }
+
+      const text = String(data.text || "").trim();
+      if (!text) {
+        throw new Error("模型没有返回修正后的题目，请换个说法再试。");
+      }
+
+      const truncated = Boolean(data.truncated) || setOcrDraft(text);
+      if (ocrCorrectInput) ocrCorrectInput.value = "";
+      showOcrStatus(
+        truncated
+          ? "修正结果超过 5000 字，已截断；请用源码模式删减后再发送。"
+          : "已按你的说明修正，公式已重新排版，请再核对一次。",
+        truncated ? "error" : "ok",
+      );
+    } catch (err) {
+      if (requestId !== ocrFixRequestId || err.name === "AbortError") return;
+      showOcrStatus(err.message || "修正失败，请稍后重试。", "error");
+    } finally {
+      if (requestId === ocrFixRequestId) {
+        ocrFixBusy = false;
+        ocrFixAbort = null;
+        updateControls();
+      }
+    }
+  }
+
+  function hydrateGuideMath() {
+    document.querySelectorAll(".guide-math[data-tex]").forEach((node) => {
+      node.innerHTML = renderMath(node.dataset.tex || "", false);
+    });
   }
 
   // ---------- 公式级编辑 ----------
@@ -1621,7 +1805,7 @@
   }
 
   async function recognizeImage(file) {
-    if (!file || busy || ocrBusy) return;
+    if (!file || busy || ocrBusy || ocrFixBusy) return;
 
     if (file.type && !/^image\/(png|jpe?g|bmp)$/i.test(file.type)) {
       showOcrStatus("只支持 PNG / JPG / BMP 图片，请换一种格式。", "error");
@@ -1637,6 +1821,7 @@
     }
 
     // 先显示原图，识别完成后和文本并排校对
+    if (ocrCorrectInput) ocrCorrectInput.value = "";
     clearOcrImage();
     ocrImageUrl = URL.createObjectURL(file);
     if (ocrImage) {
@@ -1725,7 +1910,7 @@
     const question = [ocrDraft.trim(), supplement]
       .filter(Boolean)
       .join("\n\n");
-    if (!question || busy || ocrBusy) return;
+    if (!question || busy || ocrBusy || ocrFixBusy) return;
 
     clearOcrStatus();
     clearOcrDraft();
@@ -1828,7 +2013,7 @@
 
   if (ocrBtn && ocrFile) {
     ocrBtn.addEventListener("click", () => {
-      if (!busy && !ocrBusy) ocrFile.click();
+      if (!busy && !ocrBusy && !ocrFixBusy) ocrFile.click();
     });
     ocrFile.addEventListener("change", () => {
       const file = ocrFile.files && ocrFile.files[0];
@@ -1842,6 +2027,8 @@
     ocrStatusClose.addEventListener("click", () => {
       if (ocrBusy) {
         cancelOcr();
+      } else if (ocrFixBusy) {
+        cancelOcrFix();
       } else {
         clearOcrStatus();
       }
@@ -1891,7 +2078,7 @@
 
   if (ocrRetry) {
     ocrRetry.addEventListener("click", () => {
-      if (!busy && !ocrBusy && ocrFile) ocrFile.click();
+      if (!busy && !ocrBusy && !ocrFixBusy && ocrFile) ocrFile.click();
     });
   }
 
@@ -1902,6 +2089,13 @@
       } else {
         clearOcrDraft();
       }
+    });
+  }
+
+  if (ocrCorrectForm) {
+    ocrCorrectForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitOcrCorrection();
     });
   }
 
@@ -1932,10 +2126,11 @@
     formulaBackdrop.addEventListener("click", () => closeFormulaEditor());
   }
   buildFormulaSymbols();
+  hydrateGuideMath();
 
   // 直接 Ctrl+V 粘贴截图，比先存文件再上传顺手
   document.addEventListener("paste", (event) => {
-    if (busy || ocrBusy || mode !== "solve") return;
+    if (busy || ocrBusy || ocrFixBusy || mode !== "solve") return;
     if (!composer || composer.hidden) return;
     // 步骤追问侧栏打开时，粘贴留给它自己处理
     if (stepPanel && !stepPanel.hidden) return;
@@ -1956,7 +2151,7 @@
   if (examples) {
     examples.addEventListener("click", (event) => {
       const button = event.target.closest("button[data-q]");
-      if (!button || busy || ocrBusy) return;
+      if (!button || busy || ocrBusy || ocrFixBusy) return;
       // 示例题是一道全新的题，不能和已有 OCR 题目卡拼在一起。
       clearOcrDraft();
       input.value = button.dataset.q || "";
