@@ -1361,7 +1361,7 @@
 
     const sub = document.createElement("p");
     sub.className = "paper-title-sub";
-    sub.textContent = `共 ${Number(data.count || 0)} 道题 · 题干来自题库，公式按本地重建缓存排版`;
+    sub.textContent = `共 ${Number(data.count || 0)} 道题 · 题干来自题库，公式按本地缓存/整理稿排版`;
     heading.appendChild(sub);
     titleRow.appendChild(heading);
 
@@ -1438,6 +1438,61 @@
           });
           item.appendChild(tagRow);
         }
+
+        // 官方答案默认收起：先让用户有机会自己思考，需要时再展开。
+        // 没有收录答案的题也保留按钮，明确告诉用户“暂无”，而不是静默消失。
+        const answerPanel = document.createElement("div");
+        answerPanel.className = "paper-answer";
+        answerPanel.hidden = true;
+
+        const answer = String(problem.answer || "").trim();
+        const solution = String(problem.solution || "").trim();
+        if (answer || solution) {
+          if (answer) {
+            const label = document.createElement("p");
+            label.className = "paper-answer-label";
+            label.textContent = "官方答案";
+            answerPanel.appendChild(label);
+
+            const value = document.createElement("div");
+            value.className = "paper-answer-value rendered";
+            value.innerHTML = renderMarkdown(answer);
+            answerPanel.appendChild(value);
+          }
+          if (solution) {
+            const label = document.createElement("p");
+            label.className = "paper-answer-label";
+            label.textContent = "参考解答";
+            answerPanel.appendChild(label);
+
+            const body = document.createElement("div");
+            body.className = "paper-answer-solution rendered";
+            body.innerHTML = renderMarkdown(solution);
+            answerPanel.appendChild(body);
+          }
+        } else {
+          const empty = document.createElement("p");
+          empty.className = "paper-answer-empty";
+          empty.textContent =
+            "暂无官方答案：当前题库还没有收录这道题的官方参考解答。";
+          answerPanel.appendChild(empty);
+        }
+
+        const answerToggle = document.createElement("button");
+        answerToggle.type = "button";
+        answerToggle.className = "paper-answer-toggle";
+        answerToggle.setAttribute("aria-expanded", "false");
+        answerToggle.textContent = "显示答案";
+
+        answerToggle.addEventListener("click", () => {
+          const opening = answerPanel.hidden;
+          answerPanel.hidden = !opening;
+          answerToggle.textContent = opening ? "收起答案" : "显示答案";
+          answerToggle.setAttribute("aria-expanded", String(opening));
+        });
+
+        item.appendChild(answerToggle);
+        item.appendChild(answerPanel);
 
         section.appendChild(item);
       });

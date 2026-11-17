@@ -44,7 +44,7 @@ python ask.py "计算 lim(x→0) sin x / x"   # 真实模型一问一答
 python ask.py                              # 连续提问模式，exit 退出
 python ask.py --stub "1+1"                 # 离线假模型，不联网
 python -m web.app                          # 本地 Web 版，打开 http://127.0.0.1:8000
-python -m rag.build                        # 从本地真题 PDF 构建题库（需要先有 PDF）
+python -m rag.build --papers-dir papers    # 32 份 PDF + 第 17 届整理稿，构建 399 道题库
 python -m rag.build_embeddings             # 构建 BGE 向量缓存（首次会下载模型）
 python -m rag.search "二重积分" --top 5     # 命令行检索真题（默认混合检索）
 python -m rag.search "二重积分" --retriever bm25   # 只跑 BM25，便于对照
@@ -119,9 +119,10 @@ ollama serve             # 或直接打开 Ollama 应用
 - 顶栏"新对话"会清空当前会话和页面消息，并回到解题模式
 - 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏；
   题干使用 `display_question` 的 LaTeX 重建结果，和助手回答走同一套 KaTeX 管线
-- 真题模式：左侧列出第 1–16 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
+- 真题模式：左侧列出第 1–17 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
   点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
-  缓存的 `display_question`，不额外调用模型
+  缓存的 `display_question`，不额外调用模型。每道题下有“显示答案”按钮，
+  展开后可看官方答案与参考解答（未收录的题会明确提示）
 - 图片识题：上传或 `Ctrl+V` 粘贴截图（本地 GLM-OCR 支持 PNG / JPG；
   云端 SimpleTex 额外支持 BMP），识别后生成“原图 + 排版题目”的题目卡。
   公式默认按 KaTeX 渲染，不向普通用户暴露整段 LaTeX：点击单个公式会打开
@@ -163,11 +164,12 @@ ollama serve             # 或直接打开 Ollama 应用
 - `GET /api/session/{session_id}`：恢复一个仍存在的会话；返回每轮的题干、回答、
   最终答案和步骤结构，供刷新页面后重建聊天记录。已过期或已删除返回 404
 - `DELETE /api/session/{session_id}`：结束会话，"新对话"按钮会调用
-- `GET /api/papers`：第 1–16 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
+- `GET /api/papers`：第 1–17 届的试卷目录（每份卷子的阶段、类别、补赛、题数）
 - `GET /api/paper?edition=16&stage=决赛&category=B&supplement=&section=`：
   读取一份试卷的完整题干；`edition` 与 `year` 二选一，
   `supplement` 省略表示不限补赛、传空串表示只要正卷。`question` 是题库原文，
-  `display_question` 是重建后的 Markdown + LaTeX（没有缓存时为空串）
+  `display_question` 是重建后的 Markdown + LaTeX（没有缓存时为空串）；
+  `answer` / `solution` 是官方答案与参考解答，未收录时为空串
 - `GET /api/health`：除模型状态外，还返回 `retriever`（auto/bm25/vector/hybrid）、
   `vector_available`、`embedding_model`、`sessions` / `step_sessions` 会话计数和
   `session_persistent`，方便确认混合检索与持久化是否真的启用
@@ -180,16 +182,18 @@ ollama serve             # 或直接打开 Ollama 应用
 
 ## 真题库 RAG（本地）
 
-题库来自本机的 CMC 非数学类历年真题 PDF，默认读取
-`~/Desktop/数学竞赛分享`：
+应用题库使用第 1–16 届的初赛/决赛试卷（32 份 PDF，放在 `papers/` 目录），
+再加上第 17 届（2025）初赛 A/B 类的题目与官方参考解答。2024/2025 两套
+近年卷仍只用于评测，不进入应用题库。
 
 ```bash
-python -m rag.build
-# 抽取题目：428 道 -> 去重后 417 道（初赛 240 / 决赛 177）
-# 知识点覆盖 359/417（86%）
+python -m rag.build --papers-dir papers
+# 抽取题目：394 道 -> 去重后 383 道（初赛 206 / 决赛 177）
+# 再加上第 17 届 16 道去重题，应用题库共 399 道（初赛 222 / 决赛 177）
+# 知识点覆盖 343/399（86%）
 
 python -m rag.build_embeddings
-# 417 道 × 512 维，写入 data/processed/embeddings.npz
+# 399 道 × 512 维，写入 data/processed/embeddings.npz
 
 python -m rag.latex
 # 用模型把题干重建为 Markdown + LaTeX，写入 data/processed/question_latex.json
@@ -210,8 +214,8 @@ python -m rag.build --papers-dir "D:/papers" --out data/processed/problems.jsonl
 处理链路：
 
 ```text
-34 份试卷 PDF
-   │ PyMuPDF 抽文本
+32 份初赛/决赛试卷 PDF + 第 17 届初赛 A/B 整理稿
+   │ PyMuPDF 抽文本 / 人工校对后的 Markdown
    ▼
 按版式切题（“题目N” / 2024-2025 的填空-选择-解答）
    │
@@ -225,7 +229,7 @@ python -m rag.build --papers-dir "D:/papers" --out data/processed/problems.jsonl
 data/processed/problems.jsonl
 （question / question_layout / 出处 / 届数 / 类别 / 知识点）
    ├─ BM25 索引（中文二元组 + 知识点加权）
-   ├─ BGE 编码 → data/processed/embeddings.npz（417 × 512）
+   ├─ BGE 编码 → data/processed/embeddings.npz（399 × 512）
    └─ python -m rag.latex → question_latex.json（display_question）
           │
 用户提问 ─┼─ BM25 Top-20 ─┐
@@ -315,7 +319,7 @@ CMC_QUERY_PREFIX=
 检索解决“找相似题”，按届浏览解决“把某一年的卷子完整拿出来”，两者走不同路径：
 
 ```text
-查看真题页 ── GET /api/papers ── paper_index()：第 1-16 届目录
+查看真题页 ── GET /api/papers ── paper_index()：第 1-17 届目录
      │
      └─ 点击试卷 ── GET /api/paper?edition=…&stage=… ── list_problems()
                                                     │
@@ -331,7 +335,14 @@ CMC_QUERY_PREFIX=
   的缓存，读取接口本身不调用模型。
 - **去重别名展开**：建库时同一道题可能跨届重复，去重后只保留一条主记录，旧 id
   放进 `aliases`。按届浏览时会把 `[id, *aliases]` 逐个解析回原试卷位置，否则
-  会出现“第 13 届决赛缺第 9 题”的假象。现在第 1–16 届的题号都是连续的。
+  会出现“第 13 届决赛缺第 9 题”的假象。现在第 1–17 届的题号都是连续的。
+  第 17 届 A/B 卷有四道重复题（平面、隐函数、微分方程、级数），也通过
+  `aliases` 同时出现在两套卷子里。
+- **每题可展开官方答案**：试卷接口除题干外还返回 `answer` / `solution`；
+  前端在每道题下渲染“显示答案”按钮，展开后用同一套 Markdown + KaTeX 管线
+  显示答案和参考解答。第 17 届 A/B 卷的 20 个题位全部有官方答案；其余
+  1–16 届题库目前只存题干，按钮会明确显示“暂无官方答案”，不会把模型生成的
+  内容冒充官方答案。
 - **Agent 也能列卷**：聊天里说“我要第一届真题”时，模型调用 `list_past_problems`；
   工具只返回题号、出处和数量，Web 层再按同一组参数重新读题库补全题干。
 - **Agent 也能定位单题并解答**：聊天里说“第七届非数学 A 类初赛压轴题”时，模型
@@ -340,12 +351,17 @@ CMC_QUERY_PREFIX=
 - **区分语义检索和元数据过滤**：届数、阶段、类别都是确定字段，过滤即可 100%
   命中；向量检索只解决“题目意思相近”，不能替代按届浏览或定位单题。
 
-当前题库：417 道题，第 1 届 23 道、第 13 届 31 道、第 15 届 31 道、第 16 届 42 道；
-所有试卷分组均为题号连续。
+当前应用题库：399 道题，第 1 届 23 道、第 13 届 30 道、第 15 届 27 道、
+第 16 届 36 道、第 17 届 16 道（A/B 各 10 个题位，四道重复题合并）；
+所有试卷分组均为题号连续。第 1–17 届共 17 个届次，不含只用于评测的
+2024/2025 两套近年卷。
 
 数据说明：
 
-- 真题 PDF 有版权风险，`data/` 已加入 `.gitignore`；仓库里只有代码，不提交题库。
+- 32 份初赛/决赛 PDF 和生成的 `problems.jsonl` / 向量缓存不进入 Git 历史，
+  由 Release 数据包分发；仓库本身只保留代码、安装/构建脚本和第 17 届的
+  整理稿 `rag/seventeenth.py`。
+- 2024/2025 两套近年卷只保留在评测目录，用于 34 题官方真题评测，不进入应用题库。
 - 2024/2025 两份试卷使用 Symbol 字体，抽出的公式会散架（如 `ZZ` 代表二重积分号），
   题干适合检索但可读性一般；展示时读取 `question_latex.json` 的重建结果。
 - 重建缓存不是题库的一部分：修改题干或提示词后，重跑 `python -m rag.latex`
@@ -596,8 +612,9 @@ mathcoach/
 - 向量模型在 CPU 上首次加载约 7 秒；换题库或换模型后必须重建向量缓存。
 - 47 条检索评测仍是初版标注，权重和查询指令是在同一组数据上选的，
   存在过拟合风险。
-- 2024/2025 真题的公式抽取质量差，只适合检索；展示依赖
-  `question_latex.json` 的重建结果，当前 417 道题已全部覆盖。
+- 2024/2025 真题的公式抽取质量差，只适合评测；应用题库不包含它们。
+  当前 1–16 届的 383 道应用题目已覆盖 `question_latex.json`；第 17 届题干
+  本身按 Markdown + LaTeX 整理，带 `display_ready` 标记直接展示。
 - 仍无流式输出；等待期间只能看计时和轨迹，新增的「停止」只能阻止后续步骤，
   无法中断已经发出的单次模型请求。
 
@@ -611,3 +628,6 @@ mathcoach/
    rerank 或 query-adaptive 融合，并重新设计或移除基本无效的标签加权。
 4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
 5. 完善 Web 版：流式输出、整页识别后的自动题目切分，以及带登录和限流后的公网部署。
+6. 把《第1-17届…预赛试题参考解析汇总》里第 1–16 届初赛的官方解答按题切分、
+   校对后补进题库，扩大“显示答案”的覆盖；决赛目前没有官方解答来源，仍显示
+   “暂无官方答案”。

@@ -57,7 +57,8 @@ def paper_env(tmp_path, monkeypatch):
     path = tmp_path / "papers.jsonl"
     rows = [
         {"id": "cmc-01-prelim-x-01", "question": "第一届初赛第一题", "source": "",
-         "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": ["极限"]},
+         "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": ["极限"],
+         "answer": "$1$", "solution": "由题意得 $1$。"},
         {"id": "cmc-01-prelim-x-02", "question": "第一届初赛第二题", "source": "",
          "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": []},
         {"id": "cmc-01-final-x-01", "question": "第一届决赛第一题", "source": "",
@@ -158,6 +159,42 @@ def test_get_paper_returns_full_questions(paper_env):
     assert group["complete"] is True
     assert group["problems"][0]["question"] == "第一届初赛第一题"
     assert group["problems"][0]["knowledge_points"] == ["极限"]
+    assert group["problems"][0]["answer"] == "$1$"
+    assert group["problems"][0]["solution"] == "由题意得 $1$。"
+
+
+def test_paper_index_includes_seventeenth_edition(tmp_path, monkeypatch):
+    """题库里出现第 17 届时，目录要自动延长到第 17 届。"""
+    path = tmp_path / "papers17.jsonl"
+    row = {
+        "id": "cmc-17-prelim-a-01",
+        "question": "第十七届初赛 A 类第一题",
+        "display_ready": True,
+        "answer": "$a=-\\frac13$。",
+        "solution": "由 Taylor 展开可得。",
+        "stage": "初赛",
+        "edition": 17,
+        "year": 2025,
+        "category": "A",
+        "supplement": "",
+        "number": 1,
+        "knowledge_points": ["极限"],
+    }
+    path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+    monkeypatch.setenv("CMC_INDEX_PATH", str(path))
+    monkeypatch.setenv("CMC_LATEX_PATH", str(tmp_path / "missing-latex.json"))
+
+    editions = client.get("/api/papers").json()["editions"]
+    assert [item["edition"] for item in editions] == list(range(1, 18))
+    assert editions[-1]["total"] == 1
+    assert editions[-1]["papers"][0]["label"] == "初赛 A类"
+
+    data = client.get("/api/paper", params={"edition": 17}).json()
+    problem = data["groups"][0]["problems"][0]
+    assert problem["answer"] == "$a=-\\frac13$。"
+    assert problem["solution"] == "由 Taylor 展开可得。"
+    # 没有 LaTeX 缓存时，带 display_ready 的整理题干直接用于展示。
+    assert problem["display_question"] == "第十七届初赛 A 类第一题"
 
 
 def test_get_paper_filters_supplement(paper_env):

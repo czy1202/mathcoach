@@ -231,6 +231,20 @@ def display_question_for(problem: dict | None) -> str:
         return ""
 
 
+def display_text_for(problem: dict | None) -> str:
+    """试卷/卡片实际展示的题干。
+
+    优先用 LaTeX 缓存；第 17 届的题干本身就按 Markdown + LaTeX 整理，
+    带 ``display_ready`` 标记，直接返回原文，不再走模型重建。
+    """
+    display = display_question_for(problem)
+    if display:
+        return display
+    if problem and problem.get("display_ready"):
+        return str(problem.get("question") or "")
+    return ""
+
+
 # ---------- 请求 / 响应结构 ----------
 
 class AskRequest(BaseModel):
@@ -338,6 +352,8 @@ class PaperProblem(BaseModel):
     source: str = ""
     question: str = ""
     display_question: str = ""
+    answer: str = ""
+    solution: str = ""
     knowledge_points: list[str] = Field(default_factory=list)
 
 
@@ -695,7 +711,7 @@ def _attach_related_display(hits: list[dict]) -> None:
         full_question = str(problem.get("question") or "").strip()
         if full_question:
             hit["question"] = full_question
-        display = display_question_for(problem)
+        display = display_text_for(problem)
         if display:
             hit["display_question"] = display
 
@@ -705,7 +721,7 @@ def _attach_paper_display(index, groups: list[dict]) -> None:
     for group in groups:
         for entry in group.get("problems") or []:
             problem = index.get(str(entry.get("id") or ""))
-            display = display_question_for(problem)
+            display = display_text_for(problem)
             if display:
                 entry["display_question"] = display
 
@@ -1005,7 +1021,7 @@ def fix_ocr_text(payload: OcrFixRequest) -> OcrFixResponse:
 
 @app.get("/api/papers", response_model=PaperIndexResponse)
 def list_papers() -> dict:
-    """返回第 1-16 届的试卷目录，供“查看真题”页渲染选项条。"""
+    """返回第 1 届到题库最高届的试卷目录，供“查看真题”页渲染选项条。"""
     if not index_available():
         raise HTTPException(
             status_code=503,
