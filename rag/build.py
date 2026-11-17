@@ -14,6 +14,7 @@ from collections import Counter
 from pathlib import Path
 
 from rag.papers import dedupe, extract_papers
+from rag.seventeenth import problems as seventeenth_problems
 from rag.textnorm import detect_tags
 
 
@@ -34,7 +35,9 @@ def _sort_key(problem: dict) -> tuple:
 
 
 def build(papers_dir: str | Path, out_path: str | Path) -> tuple[list[dict], int]:
-    raw = extract_papers(papers_dir)
+    # 1-16 届从 papers/ 的 PDF 抽取；第 17 届（2025 初赛 A/B）来自
+    # 单独的参考解答整理，直接并入同一条去重/打标签流水线。
+    raw = extract_papers(papers_dir) + seventeenth_problems()
     problems = dedupe(raw)
 
     for problem in problems:

@@ -21,7 +21,7 @@ _SECTION_ORDER = {"选择题": 0, "填空题": 1, "解答题": 2}
 def problem_year(problem: dict) -> int | None:
     """取题目所属年份。
 
-    第 1-16 届按届数组织，没有年份；2024/2025 两份卷子的
+    第 1-16 届按届数组织；第 17 届带 2025 年份；2024/2025 两份卷子的
     ``edition`` 为空，只能从出处里解析。
     """
     raw = problem.get("year")
@@ -73,6 +73,8 @@ def _entry(problem: dict, membership: dict) -> dict:
         "number": int(membership.get("number") or 0),
         "source": membership.get("source") or problem.get("source", ""),
         "question": problem.get("question", ""),
+        "answer": problem.get("answer") or "",
+        "solution": problem.get("solution") or "",
         "knowledge_points": list(problem.get("knowledge_points") or []),
     }
 
@@ -313,9 +315,16 @@ class ProblemIndex:
         return groups
 
     def paper_index(self) -> list[dict]:
-        """给前端用的试卷目录：第 1-16 届，每届列出各份试卷的题数。"""
+        """给前端用的试卷目录：第 1 届到题库里的最高届，列出各份试卷的题数。"""
+        known = [
+            int(problem["edition"])
+            for problem in self.problems
+            if problem.get("edition") not in (None, "")
+        ]
+        # 历史版本固定展示到第 16 届；题库里出现第 17 届时自动延长。
+        max_edition = max([16, *known])
         editions: list[dict] = []
-        for edition in range(1, 17):
+        for edition in range(1, max_edition + 1):
             entries = self.list_problems(edition=edition)
             groups = self.group_problems(entries)
             papers = [

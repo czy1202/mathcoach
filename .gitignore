@@ -5,3 +5,6 @@ __pycache__/
 traces/
 data/
 eval/ocr_results/
+
+# 真题 PDF 只在本地/Release 数据包中使用，不进入 Git 历史
+papers/

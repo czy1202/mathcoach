@@ -177,6 +177,30 @@ def test_dedupe_merges_same_question_and_keeps_aliases():
     assert unique[0]["aliases"] == ["b"]
 
 
+def test_seventeenth_has_ten_positions_per_paper_and_official_answers():
+    """第十七届 A/B 各 10 题；四道重复题合并后仍能在两卷中展开。"""
+    from rag.seventeenth import problems as seventeenth_problems
+
+    unique = dedupe(seventeenth_problems())
+    assert len(unique) == 16
+    assert all(item["answer"] and item["solution"] for item in unique)
+    assert all(item["display_ready"] for item in unique)
+
+    index = ProblemIndex(unique)
+    for category in ("A", "B"):
+        entries = index.list_problems(edition=17, category=category)
+        assert [entry["number"] for entry in entries] == list(range(1, 11))
+        assert all(entry["answer"] for entry in entries)
+
+    numbers = {
+        entry["paper_id"]: entry["number"]
+        for category in ("A", "B")
+        for entry in index.list_problems(edition=17, category=category)
+    }
+    assert numbers["cmc-17-prelim-a-02"] == 2
+    assert numbers["cmc-17-prelim-b-02"] == 2
+
+
 # ---------- 索引检索 ----------
 
 def _problem(pid, question, *, stage="初赛", category="A", tags=None):
