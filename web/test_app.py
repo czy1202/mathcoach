@@ -46,9 +46,11 @@ def _clear_index_cache():
     """题库缓存按路径缓存；换临时题库时必须清掉。"""
     tools._INDEX_CACHE = None
     tools._INDEX_CACHE_PATH = None
+    tools._INDEX_CACHE_ANSWERS_MTIME = None
     yield
     tools._INDEX_CACHE = None
     tools._INDEX_CACHE_PATH = None
+    tools._INDEX_CACHE_ANSWERS_MTIME = None
 
 
 @pytest.fixture
@@ -76,6 +78,8 @@ def paper_env(tmp_path, monkeypatch):
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     monkeypatch.setenv("CMC_INDEX_PATH", str(path))
+    # 测试题库自带答案；不要让本地真实的 answers.jsonl 覆盖它
+    monkeypatch.setenv("CMC_ANSWERS_PATH", str(tmp_path / "answers.jsonl"))
     return path
 
 
