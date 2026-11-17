@@ -201,6 +201,71 @@ def test_seventeenth_has_ten_positions_per_paper_and_official_answers():
     assert numbers["cmc-17-prelim-b-02"] == 2
 
 
+# ---------- 外部答案合并 ----------
+
+def _write_jsonl(path, rows):
+    with open(path, "w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def test_load_merges_external_answers(tmp_path):
+    """独立 answers.jsonl 按 id 合并，且不覆盖题库原有字段。"""
+    problems_path = tmp_path / "problems.jsonl"
+    answers_path = tmp_path / "answers.jsonl"
+    _write_jsonl(problems_path, [
+        {"id": "cmc-01-prelim-a-01", "question": "求 1/2", "stage": "初赛",
+         "edition": 1, "category": "A", "number": 1},
+        {"id": "cmc-01-prelim-a-02", "question": "求 1/3", "stage": "初赛",
+         "edition": 1, "category": "A", "number": 2},
+    ])
+    _write_jsonl(answers_path, [
+        {"id": "cmc-01-prelim-a-01", "answer": "1/2", "solution": "解答过程"},
+        {"id": "not-in-index", "answer": "x", "solution": "y"},
+    ])
+
+    index = ProblemIndex.load(problems_path, answers_path=answers_path)
+
+    assert index.get("cmc-01-prelim-a-01")["answer"] == "1/2"
+    assert index.get("cmc-01-prelim-a-01")["solution"] == "解答过程"
+    assert index.get("cmc-01-prelim-a-02").get("answer") in (None, "")
+    entries = index.list_problems(edition=1, stage="初赛")
+    assert entries[0]["answer"] == "1/2"
+    assert entries[1].get("answer") in (None, "")
+
+
+def test_load_merges_answers_keyed_by_alias(tmp_path):
+    """去重后保留的旧 id 也能命中主记录，避免同一道题在两个位置答案不一致。"""
+    problems_path = tmp_path / "problems.jsonl"
+    answers_path = tmp_path / "answers.jsonl"
+    _write_jsonl(problems_path, [
+        {"id": "cmc-01-prelim-a-01", "question": "重复题", "stage": "初赛",
+         "edition": 1, "category": "A", "number": 1,
+         "aliases": ["cmc-01-prelim-b-01"]},
+    ])
+    _write_jsonl(answers_path, [
+        {"id": "cmc-01-prelim-b-01", "answer": "42", "solution": "旧 id 的答案"},
+    ])
+
+    index = ProblemIndex.load(problems_path, answers_path=answers_path)
+
+    assert index.get("cmc-01-prelim-a-01")["answer"] == "42"
+    assert index.get("cmc-01-prelim-b-01")["answer"] == "42"
+
+
+def test_load_without_answers_file_still_works(tmp_path):
+    """答案文件缺失时保持原有行为，不影响题库加载。"""
+    problems_path = tmp_path / "problems.jsonl"
+    _write_jsonl(problems_path, [
+        {"id": "cmc-01-prelim-a-01", "question": "题", "stage": "初赛",
+         "edition": 1, "category": "A", "number": 1},
+    ])
+
+    index = ProblemIndex.load(problems_path, answers_path=tmp_path / "missing.jsonl")
+
+    assert index.get("cmc-01-prelim-a-01").get("answer") in (None, "")
+
+
 # ---------- 索引检索 ----------
 
 def _problem(pid, question, *, stage="初赛", category="A", tags=None):

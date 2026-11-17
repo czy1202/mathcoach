@@ -137,11 +137,20 @@ TOOLS: dict[str, dict] = {
 _INDEX_LOCK = threading.Lock()
 _INDEX_CACHE: Any = None
 _INDEX_CACHE_PATH: Path | None = None
+_INDEX_CACHE_ANSWERS_MTIME: float | None = None
 
 
 def index_path() -> Path:
     """题库 JSONL 的位置，可用 CMC_INDEX_PATH 覆盖（测试和换数据时用）。"""
     return Path(os.environ.get("CMC_INDEX_PATH", "data/processed/problems.jsonl"))
+
+
+def answers_path() -> Path:
+    """官方答案 JSONL 的位置，可用 CMC_ANSWERS_PATH 覆盖。
+
+    答案与题库分开存放：文件不存在时索引照常工作，只是试卷页显示"暂无"。
+    """
+    return Path(os.environ.get("CMC_ANSWERS_PATH", "data/processed/answers.jsonl"))
 
 
 def index_available() -> bool:
@@ -151,11 +160,17 @@ def index_available() -> bool:
 
 def load_problem_index():
     """懒加载题库索引，避免未使用 RAG 的命令行也读一遍 JSONL。"""
-    global _INDEX_CACHE, _INDEX_CACHE_PATH
+    global _INDEX_CACHE, _INDEX_CACHE_PATH, _INDEX_CACHE_ANSWERS_MTIME
 
     path = index_path()
+    answers = answers_path()
+    answers_mtime = answers.stat().st_mtime if answers.exists() else None
     with _INDEX_LOCK:
-        if _INDEX_CACHE is not None and _INDEX_CACHE_PATH == path:
+        if (
+            _INDEX_CACHE is not None
+            and _INDEX_CACHE_PATH == path
+            and _INDEX_CACHE_ANSWERS_MTIME == answers_mtime
+        ):
             return _INDEX_CACHE
         if not path.exists():
             raise FileNotFoundError(
@@ -163,8 +178,12 @@ def load_problem_index():
             )
         from rag.index import ProblemIndex
 
-        _INDEX_CACHE = ProblemIndex.load(path)
+        _INDEX_CACHE = ProblemIndex.load(
+            path,
+            answers_path=answers if answers.exists() else None,
+        )
         _INDEX_CACHE_PATH = path
+        _INDEX_CACHE_ANSWERS_MTIME = answers_mtime
         return _INDEX_CACHE
 
 

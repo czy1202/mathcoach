@@ -128,6 +128,25 @@ class SearchHit:
         }
 
 
+def load_answers(path: str | Path) -> dict[str, dict]:
+    """读取独立的官方答案 JSONL，按题目 id 建表。
+
+    答案与题库分开存放：补答案时不需要重建题库或向量缓存，
+    删掉答案文件即可回到"只有题干"的状态。
+    """
+    answers: dict[str, dict] = {}
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = json.loads(line)
+            problem_id = str(record.get("id") or "").strip()
+            if problem_id:
+                answers[problem_id] = record
+    return answers
+
+
 class ProblemIndex:
     def __init__(self, problems: list[dict]) -> None:
         self.problems = problems
@@ -147,14 +166,39 @@ class ProblemIndex:
                     self._by_id.setdefault(str(problem_id), problem)
 
     @classmethod
-    def load(cls, path: str | Path) -> "ProblemIndex":
+    def load(
+        cls,
+        path: str | Path,
+        answers_path: str | Path | None = None,
+    ) -> "ProblemIndex":
         problems: list[dict] = []
         with open(path, encoding="utf-8") as handle:
             for line in handle:
                 line = line.strip()
                 if line:
                     problems.append(json.loads(line))
-        return cls(problems)
+        index = cls(problems)
+        if answers_path is not None and Path(answers_path).exists():
+            index.apply_answers(load_answers(answers_path))
+        return index
+
+    def apply_answers(self, answers: dict[str, dict]) -> int:
+        """把官方答案合并到主记录上，返回实际匹配到的条数。
+
+        答案表按 id 索引；去重时保留的旧 id（aliases）也能命中同一条主记录。
+        任何字段缺失都跳过，不用空值覆盖已有内容。
+        """
+        applied = 0
+        for problem_id, record in answers.items():
+            problem = self._by_id.get(str(problem_id))
+            if problem is None:
+                continue
+            if record.get("answer"):
+                problem["answer"] = record["answer"]
+            if record.get("solution"):
+                problem["solution"] = record["solution"]
+            applied += 1
+        return applied
 
     def __len__(self) -> int:
         return len(self.problems)
