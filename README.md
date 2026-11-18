@@ -180,8 +180,8 @@ SIMPLETEX_TOKEN=用户自己的令牌
   `step_session_id`，不会修改主会话
 - `POST /api/ocr`：`multipart/form-data`，字段名 `file`。只做识别，不调用解题
   模型、不创建会话；返回 `{text, mode, confidence?}`，前端生成题目卡后由用户
-  核对、修改并手动发送。SimpleTex 未配置或 `OCR_PROVIDER` 无效返回 503，
-  格式/大小/上游失败分别返回 415 / 413 / 502
+  核对、修改并手动发送。DeepSeek / SimpleTex 未配置或 `OCR_PROVIDER` 无效
+  返回 503，格式/大小/上游失败分别返回 415 / 413 / 502
 - `POST /api/ocr/fix`：请求体 `{text, instruction}`，带着原识别结果和用户的大白话
   纠错说明做一轮题干校对；返回 `{text, elapsed, truncated}`，不创建会话、不触发
   解题。未配置 API Key 返回 503，模型正忙返回 429，上游失败返回 502
