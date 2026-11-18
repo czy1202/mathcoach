@@ -8,3 +8,7 @@ eval/ocr_results/
 
 # 真题 PDF 只在本地/Release 数据包中使用，不进入 Git 历史
 papers/
+
+# 模型缓存和重复权重；模型本体由 Git LFS 管理
+models/hf-cache/
+models/**/pytorch_model.bin

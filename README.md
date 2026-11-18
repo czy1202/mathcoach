@@ -29,31 +29,71 @@
 
 ## 快速开始
 
+仓库自带：
+
+- `kb/`：399 道题 + 212 道官方答案 + 展示用 LaTeX + BGE 文档向量
+- `models/bge-small-zh-v1.5`：BGE 模型（Git LFS 管理，约 92 MB）
+
+用户只需要准备 **Python 3.10+** 和 **自己的 DeepSeek API Key**。
+
+### Windows
+
+- 安装 Python 3.10+，勾选 “Add Python to PATH”
+- 安装 Git LFS（首次使用）
+- clone 仓库：
+
+  ```bash
+  git lfs install
+  git clone <仓库地址>
+  cd mathcoach
+  ```
+
+- 双击 `start.bat`
+- 在自动打开的记事本里填写：
+
+  ```bash
+  OPENAI_API_KEY=你的 DeepSeek Key
+  ```
+
+- 保存并关闭记事本，脚本会自动启动服务并打开：
+
+  ```text
+  http://127.0.0.1:8000
+  ```
+
+### macOS / Linux
+
+```bash
+git lfs install
+git clone <仓库地址>
+cd mathcoach
+chmod +x start.sh
+./start.sh
+```
+
+首次运行会创建 `.env`，填写 `OPENAI_API_KEY` 后重新运行即可。
+
+### 手动启动
+
 ```bash
 cd mathcoach
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
+copy .env.example .env        # macOS/Linux: cp .env.example .env
+# 只需填写 OPENAI_API_KEY；kb/ 和 models/ 路径已经在 .env.example 里配好
+python -m web.app
+```
 
-# 配置模型：.env 已被 .gitignore 忽略，不要提交
-copy .env.example .env
-# 填入用户自己的 OPENAI_API_KEY（DeepSeek Key）。
-# 默认解题和图片识题都使用 deepseek-flash；如果要分开：
-#   OPENAI_MODEL=deepseek-flash
-#   OPENAI_VISION_MODEL=deepseek-flash
-#   OCR_PROVIDER=deepseek
+不需要安装 Ollama，也不需要自己的服务器。
 
-# 不需要安装 Ollama，也不需要自己的服务器。
-# 可选：如果更想用本机免费 OCR，再安装 Ollama：
-# ollama pull glm-ocr                       # 约 2.7 GB，只需下载一次
-# ollama serve                              # 或直接打开 Ollama 应用
+### 开发者命令
 
+```bash
 python ask.py "计算 lim(x→0) sin x / x"   # 真实模型一问一答
 python ask.py                              # 连续提问模式，exit 退出
 python ask.py --stub "1+1"                 # 离线假模型，不联网
 python -m web.app                          # 本地 Web 版，打开 http://127.0.0.1:8000
-python -m rag.build --papers-dir papers    # 32 份 PDF + 第 17 届整理稿，构建 399 道题库
-python -m rag.build_embeddings             # 构建 BGE 向量缓存（首次会下载模型）
 python -m rag.search "二重积分" --top 5     # 命令行检索真题（默认混合检索）
 python -m rag.search "二重积分" --retriever bm25   # 只跑 BM25，便于对照
 python -m rag.evaluate --misses             # 检索评测：BM25 / BGE / RRF
@@ -64,7 +104,15 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 435 个测试
+pytest                              # 436 个测试
+```
+
+如果要重建知识库（仓库不包含 PDF）：
+
+```bash
+python -m rag.build --papers-dir papers    # 需要用户自备 PDF
+python -m rag.build_embeddings
+python -m rag.latex
 ```
 
 `eval.run_eval` 的常用开关：
@@ -312,13 +360,16 @@ BM25 对公式、符号和术语很强，但用户只给语义描述时会漏召
   定位；`position=last/first` 解析压轴题/第一题，返回完整题干（优先
   `question_latex.json` 的展示版）。
 
-本机配置（`.env`，已被 gitignore）：
+仓库自带配置（`.env.example`，用户复制为 `.env` 后只需填 Key）：
 
 ```bash
-CMC_EMBEDDING_MODEL=D:/mathcoach-ai/models/bge-small-zh-v1.5
-CMC_MODEL_CACHE=D:/mathcoach-ai/models
-HF_HOME=D:/mathcoach-ai/hf-cache
-CMC_EMBEDDINGS_PATH=data/processed/embeddings.npz
+CMC_INDEX_PATH=kb/problems.jsonl
+CMC_ANSWERS_PATH=kb/answers.jsonl
+CMC_EMBEDDINGS_PATH=kb/embeddings.npz
+CMC_LATEX_PATH=kb/question_latex.json
+CMC_EMBEDDING_MODEL=models/bge-small-zh-v1.5
+CMC_MODEL_CACHE=models
+HF_HOME=models/hf-cache
 CMC_RETRIEVER=auto
 # 默认不加查询指令；设成官方指令可做消融
 CMC_QUERY_PREFIX=
@@ -386,12 +437,14 @@ CMC_QUERY_PREFIX=
 
 数据说明：
 
-- 官方答案单独存在 `data/processed/answers.jsonl`，按题目 id 合并进索引；
-  设置 `CMC_ANSWERS_PATH` 可以换路径。答案文件缺失时试卷页自动回到
+- 仓库自带 `kb/` 下的四个文件：`problems.jsonl`、`embeddings.npz`、
+  `question_latex.json`、`answers.jsonl`；`CMC_*_PATH` 可以覆盖默认路径。
+  用户 clone 后不需要 PDF，也不需要重新建库。
+- 官方答案按题目 id 合并进索引；答案文件缺失时试卷页自动回到
   “暂无官方答案”，补答案不需要重建题库或向量缓存。
 - 答案文本来自本地 GLM-OCR 对扫描件的逐页识别，再用“规则切题 + 模型摘录
   最终答案”整理；OCR 对细小根号、上下标仍可能出错，抽查时以原 PDF 为准。
-  答案文件和其他题库产物一样不进入 Git 历史，由 Release 数据包分发。
+  `data/private/` 里的 OCR 中间产物和原始 PDF 仍不进入 Git。
 - 32 份初赛/决赛 PDF 和生成的 `problems.jsonl` / 向量缓存不进入 Git 历史，
   由 Release 数据包分发；仓库本身只保留代码、安装/构建脚本和第 17 届的
   整理稿 `rag/seventeenth.py`。
@@ -573,6 +626,11 @@ Agent（注入 TraceRecorder）
 
 ```text
 mathcoach/
+├── start.bat           # Windows 一键启动
+├── start.sh            # macOS / Linux 一键启动
+├── kb/                 # 仓库自带知识库：problems / embeddings / question_latex / answers
+├── models/
+│   └── bge-small-zh-v1.5/  # BGE 模型（Git LFS）
 ├── ask.py              # 命令行一问一答入口（最小产品壳）
 ├── agent.py            # Agent 循环、超时/步数护栏、轨迹事件
 ├── llm.py              # OpenAI 兼容客户端 + StubClient（同一接口）
@@ -596,7 +654,7 @@ mathcoach/
 │   ├── evaluate.py     # 检索评测：Recall@1 / Recall@5 / MRR
 │   ├── eval_queries.jsonl  # 47 条标注查询
 │   └── search.py       # 命令行检索
-├── data/               # 题库产物 problems.jsonl / question_latex.json（已 gitignore）
+├── data/               # 本地构建产物、OCR 中间文件、会话库（已 gitignore）
 ├── web/
 │   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-step、/api/ocr、/api/papers
 │   ├── sessions.py     # 会话存储：内存 + SQLite、TTL、上下文裁剪、请求占用
@@ -668,4 +726,4 @@ mathcoach/
 5. 完善 Web 版：流式输出、整页识别后的自动题目切分，以及带登录和限流后的公网部署。
 6. 继续补齐官方答案：第 13 届补赛 10 题需要另找来源，决赛 177 题目前没有
    官方解答；已导入的初赛答案仍要抽查 OCR 公式，并把校对结果回写
-   `data/processed/answers.jsonl`。
+   `kb/answers.jsonl`（本地 `data/processed/answers.jsonl` 同步一份）。

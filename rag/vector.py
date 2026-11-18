@@ -25,6 +25,7 @@ from typing import Callable, Iterable, Sequence
 
 import numpy as np
 
+import config  # 触发 .env 加载，保证 CMC_* 路径在直接使用 rag 时也生效
 from rag.index import ProblemIndex
 
 
@@ -53,6 +54,19 @@ def configured_model_name() -> str:
     """当前配置的嵌入模型名，可用 CMC_EMBEDDING_MODEL 覆盖。"""
     value = os.environ.get("CMC_EMBEDDING_MODEL", "").strip()
     return value or DEFAULT_MODEL
+
+
+def _model_identity(name: str) -> str:
+    """把模型名/路径归一成可比对的标识。
+
+    缓存里可能记录构建机器上的绝对路径（例如
+    ``D:/models/bge-small-zh-v1.5``），用户机器上的路径不同但模型相同。
+    只比较最后一段目录名，避免因为盘符或目录不同而误判缓存失效。
+    """
+    value = str(name or "").strip().replace("\\", "/").rstrip("/")
+    if not value:
+        return ""
+    return value.rsplit("/", 1)[-1].lower()
 
 
 def model_cache_folder() -> str | None:
@@ -183,7 +197,8 @@ class VectorIndex:
         if (
             check_model
             and vector_index.model_name
-            and vector_index.model_name != current_model
+            and _model_identity(vector_index.model_name)
+            != _model_identity(current_model)
         ):
             raise VectorCacheError(
                 f"向量缓存由 {vector_index.model_name} 生成，"

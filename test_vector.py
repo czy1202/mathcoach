@@ -144,6 +144,25 @@ def test_vector_cache_rejects_changed_model(tmp_path, monkeypatch):
         VectorIndex.load_for(_sample_index(), path)
 
 
+def test_vector_cache_accepts_different_paths_for_same_model(tmp_path, monkeypatch):
+    """缓存记录构建机的绝对路径时，用户用项目内相对路径也能命中。"""
+    path = build_vector_index(
+        _sample_index(),
+        tmp_path / "e.npz",
+        encoder=_doc_encoder,
+        model_name="D:/mathcoach-ai/models/bge-small-zh-v1.5",
+    )
+    monkeypatch.setenv(
+        "CMC_EMBEDDING_MODEL", "models/bge-small-zh-v1.5"
+    )
+
+    vector_index = VectorIndex.load_for(
+        _sample_index(), path, query_encoder=_query_encoder
+    )
+
+    assert vector_index.model_name.endswith("bge-small-zh-v1.5")
+
+
 def test_missing_vector_cache_has_actionable_error(tmp_path):
     with pytest.raises(VectorCacheError, match="build_embeddings"):
         VectorIndex.load(tmp_path / "missing.npz")
