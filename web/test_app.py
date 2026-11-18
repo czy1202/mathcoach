@@ -62,7 +62,8 @@ def paper_env(tmp_path, monkeypatch):
          "stage": "初赛", "category": "未分类", "number": 1, "knowledge_points": ["极限"],
          "answer": "$1$", "solution": "由题意得 $1$。"},
         {"id": "cmc-01-prelim-x-02", "question": "第一届初赛第二题", "source": "",
-         "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": []},
+         "stage": "初赛", "category": "未分类", "number": 2, "knowledge_points": [],
+         "answer": r"\frac{1}{2}", "solution": r"由定义得 \frac{1}{2}。"},
         {"id": "cmc-01-final-x-01", "question": "第一届决赛第一题", "source": "",
          "stage": "决赛", "category": "未分类", "number": 1, "knowledge_points": []},
         {"id": "cmc-13-prelim-x-01", "question": "第十三届初赛第一题", "source": "",
@@ -81,6 +82,49 @@ def paper_env(tmp_path, monkeypatch):
     # 测试题库自带答案；不要让本地真实的 answers.jsonl 覆盖它
     monkeypatch.setenv("CMC_ANSWERS_PATH", str(tmp_path / "answers.jsonl"))
     return path
+
+
+def test_ensure_display_math_wraps_bare_latex():
+    """OCR/模型摘录的裸 LaTeX 要补上美元符号，前端才会走 KaTeX。"""
+    assert web_app.ensure_display_math(r"\frac{1}{2}") == r"$\frac{1}{2}$"
+    assert web_app.ensure_display_math(r"2\pi") == r"$2\pi$"
+
+
+def test_ensure_display_math_keeps_existing_delimiters():
+    """已有 $...$ / $$...$$ 的内容不能重复包裹。"""
+    assert web_app.ensure_display_math(r"$x=1$") == r"$x=1$"
+    assert web_app.ensure_display_math(r"答案：$$\frac{1}{2}$$") == r"答案：$$\frac{1}{2}$$"
+
+
+def test_ensure_display_math_splits_chinese_punctuation():
+    """中文和中文标点留在公式外，避免 KaTeX 排进数学模式。"""
+    result = web_app.ensure_display_math(
+        r"g'(x)=\frac{1}{x}，g'(0)=\frac A2；在x=0处连续"
+    )
+    assert r"$g'(x)=\frac{1}{x}$" in result
+    assert r"$g'(0)=\frac A2$" in result
+    assert "，$g" in result
+    assert "；在" in result
+
+
+def test_ensure_display_math_leaves_plain_text():
+    """纯中文/纯文字答案保持原样。"""
+    assert web_app.ensure_display_math("得证") == "得证"
+    assert web_app.ensure_display_math("") == ""
+
+
+def test_get_paper_normalizes_bare_latex(paper_env):
+    """试卷接口返回的官方答案也要经过同一套公式定界符清洗。"""
+    response = client.get("/api/paper", params={
+        "edition": 1,
+        "stage": "初赛",
+        "category": "未分类",
+        "supplement": "",
+    })
+    assert response.status_code == 200
+    problem = response.json()["groups"][0]["problems"][1]
+    assert problem["answer"] == r"$\frac{1}{2}$"
+    assert r"$\frac{1}{2}$" in problem["solution"]
 
 
 class CountingClient:

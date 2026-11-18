@@ -56,7 +56,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 421 个测试
+pytest                              # 426 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -119,6 +119,9 @@ ollama serve             # 或直接打开 Ollama 应用
 - 顶栏"新对话"会清空当前会话和页面消息，并回到解题模式
 - 回答下方展示“相关真题”卡片（出处 + 题干 + 知识点），题库缺失时自动隐藏；
   题干使用 `display_question` 的 LaTeX 重建结果，和助手回答走同一套 KaTeX 管线
+- 官方答案/参考解答在返回前会补齐公式定界符：OCR 产生的裸 LaTeX
+  （如 `\frac{1}{2}`）会自动包成 `$...$`，中文和中文标点留在公式外；
+  已带 `$` 的内容不会重复包裹
 - 真题模式：左侧列出第 1–17 届的所有试卷（初赛 / 决赛 / A、B 类 / 补赛），
   点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
   缓存的 `display_question`，不额外调用模型。每道题下有“显示答案”按钮，

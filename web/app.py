@@ -491,6 +491,70 @@ def normalize_math_delimiters(text: str) -> str:
     return text
 
 
+_MATH_CHARS_RE = re.compile(r"\\[A-Za-z]+|[=^_{}()\[\]]|[A-Za-z]'")
+_CHINESE_RE = re.compile(r"[\u4e00-\u9fff]+")
+_CJK_SPLIT_RE = re.compile(r"[\u4e00-\u9fff，。；：、！？（）【】“”‘’]+")
+_CHINESE_PUNCT = "，。；：、！？（）【】“”‘’"
+
+
+def _wrap_bare_math(segment: str) -> str:
+    """给一段不含现有定界符的文本补 $...$。
+
+    只包裹“像数学”的片段，中文和普通说明保持原样；中文标点留在
+    公式外面，避免 KaTeX 把句读排进数学模式。
+    """
+    if not segment.strip() or "$" in segment:
+        return segment
+    if not _MATH_CHARS_RE.search(segment):
+        return segment
+
+    core = segment
+    prefix = ""
+    suffix = ""
+    while core and core[0] in _CHINESE_PUNCT:
+        prefix += core[0]
+        core = core[1:]
+    while core and core[-1] in _CHINESE_PUNCT:
+        suffix = core[-1] + suffix
+        core = core[:-1]
+    if not core.strip():
+        return segment
+
+    leading = core[:len(core) - len(core.lstrip())]
+    trailing = core[len(core.rstrip()):]
+    body = core.strip()
+    return f"{prefix}{leading}${body}${trailing}{suffix}"
+
+
+def ensure_display_math(text: str | None) -> str:
+    """把答案/解答里的裸 LaTeX 补上 $...$，供前端 KaTeX 渲染。
+
+    已有 $...$ / $$...$$ / \\\\(...\\\\) / \\\\[...\\\\] 的内容原样保留；
+    只处理定界符之外的片段。OCR/模型摘录经常产生 ``\\frac{1}{2}``
+    这种没有美元符号的答案，前端会把它当普通文本显示。
+    """
+    if not text:
+        return ""
+    text = normalize_math_delimiters(str(text))
+    # 先按现有公式定界符切开，只处理公式外面的文本
+    parts = re.split(r"(\$\$.*?\$\$|\$.*?\$)", text, flags=re.S)
+    out: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.startswith("$"):
+            out.append(part)
+            continue
+        # 中文连续段不包裹；其余片段按“是否像数学”决定
+        pos = 0
+        for match in _CJK_SPLIT_RE.finditer(part):
+            out.append(_wrap_bare_math(part[pos:match.start()]))
+            out.append(match.group(0))
+            pos = match.end()
+        out.append(_wrap_bare_math(part[pos:]))
+    return "".join(out)
+
+
 def strip_answer_marker(text: str) -> str:
     """去掉正文里的最后一行“最终答案：...”，避免和答案卡片重复。"""
     matches = list(_ANSWER_LINE_RE.finditer(text))
@@ -724,6 +788,10 @@ def _attach_paper_display(index, groups: list[dict]) -> None:
             display = display_text_for(problem)
             if display:
                 entry["display_question"] = display
+            if entry.get("answer"):
+                entry["answer"] = ensure_display_math(entry["answer"])
+            if entry.get("solution"):
+                entry["solution"] = ensure_display_math(entry["solution"])
 
 
 def build_paper_payload(
