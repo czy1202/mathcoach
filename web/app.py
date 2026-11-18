@@ -491,7 +491,7 @@ def normalize_math_delimiters(text: str) -> str:
     return text
 
 
-_MATH_CHARS_RE = re.compile(r"\\[A-Za-z]+|[=^_{}()\[\]]|[A-Za-z]'")
+_MATH_CHARS_RE = re.compile(r"\\[A-Za-z]+|[=^_{}]|[A-Za-z]'|[A-Za-z]\s*\(")
 _CHINESE_RE = re.compile(r"[\u4e00-\u9fff]+")
 _CJK_SPLIT_RE = re.compile(r"[\u4e00-\u9fff，。；：、！？（）【】“”‘’]+")
 _CHINESE_PUNCT = "，。；：、！？（）【】“”‘’"

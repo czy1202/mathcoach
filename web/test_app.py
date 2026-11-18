@@ -113,6 +113,12 @@ def test_ensure_display_math_leaves_plain_text():
     assert web_app.ensure_display_math("") == ""
 
 
+def test_ensure_display_math_does_not_wrap_bracket_labels():
+    """[解] 这类中文标签不能被拆成 [ 和 ] 两个公式。"""
+    assert web_app.ensure_display_math("[解] 令 x=1") == "[解] 令 $x=1$"
+    assert web_app.ensure_display_math("[0,1]") == "[0,1]"
+
+
 def test_get_paper_normalizes_bare_latex(paper_env):
     """试卷接口返回的官方答案也要经过同一套公式定界符清洗。"""
     response = client.get("/api/paper", params={
