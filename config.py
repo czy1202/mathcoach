@@ -18,6 +18,11 @@ load_dotenv()
 OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
 OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "")
 OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "")
+# 图片识题用的视觉模型。DeepSeek 官方 Vision 文档目前支持 deepseek-flash；
+# 可以和 OPENAI_MODEL 相同，也可以单独指定。
+OPENAI_VISION_MODEL: str = (
+    os.getenv("OPENAI_VISION_MODEL", "").strip() or "deepseek-flash"
+)
 
 # 默认不传 temperature，沿用接口默认值。
 # 实测把温度设为 0 会让模型反复重试同一个失败的 sympy 验证，反而撞步数上限。
@@ -25,9 +30,11 @@ _temperature = os.getenv("OPENAI_TEMPERATURE", "").strip()
 OPENAI_TEMPERATURE: float | None = float(_temperature) if _temperature else None
 
 # 图片识别提供方：
-#   ollama    —— 本地开源模型，免费、图片不出本机（默认）
-#   simpletex —— 第三方云端 OCR，需要 token 或 APP ID/SECRET
-OCR_PROVIDER: str = os.getenv("OCR_PROVIDER", "ollama").strip().lower() or "ollama"
+#   deepseek  —— 复用 OPENAI_API_KEY / OPENAI_BASE_URL，调用 OPENAI_VISION_MODEL
+#                （默认 deepseek-flash）。用户不需要安装 Ollama。
+#   ollama    —— 本地开源模型，免费、图片不出本机；需要本机安装 Ollama。
+#   simpletex —— 第三方云端数学 OCR，需要 token 或 APP ID/SECRET。
+OCR_PROVIDER: str = os.getenv("OCR_PROVIDER", "deepseek").strip().lower() or "deepseek"
 
 # 本地识别：Ollama 已安装并启动后，先 ollama pull glm-ocr（约 2.7 GB）。
 OLLAMA_HOST: str = (

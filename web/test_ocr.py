@@ -54,6 +54,21 @@ def test_health_reports_ocr_configured(configured):
     assert response.json()["ocr_provider"] == "simpletex"
 
 
+def test_health_reports_deepseek(monkeypatch):
+    """DeepSeek 视觉复用 OPENAI_API_KEY，配置后应同时报告可用。"""
+    monkeypatch.setattr(config, "OCR_PROVIDER", "deepseek")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "OPENAI_VISION_MODEL", "deepseek-flash")
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ocr_provider"] == "deepseek"
+    assert data["ocr_configured"] is True
+    assert data["ocr_available"] is True
+
+
 def test_health_reports_local_ocr(monkeypatch):
     """默认的本地 Ollama 不需要密钥，始终视为已配置。"""
     monkeypatch.setattr(config, "OCR_PROVIDER", "ollama")

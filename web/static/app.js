@@ -70,7 +70,8 @@
   let ocrFixBusy = false;
   let ocrFixRequestId = 0;
   let ocrFixAbort = null;
-  let ocrProvider = "ollama";
+  let ocrProvider = "deepseek";
+  let ocrAvailable = true;
   let ocrStatusTimer = null;
   let ocrImageUrl = null;
   let ocrAbort = null;
@@ -1520,7 +1521,7 @@
     sendBtn.disabled = busy || ocrBusy || ocrFixBusy;
     newChatBtn.disabled = busy;
     input.disabled = busy;
-    if (ocrBtn) ocrBtn.disabled = busy || ocrBusy || ocrFixBusy;
+    if (ocrBtn) ocrBtn.disabled = !ocrAvailable || busy || ocrBusy || ocrFixBusy;
     if (homeBtn) homeBtn.disabled = busy;
     if (ocrSourceToggle) {
       ocrSourceToggle.disabled = busy || ocrBusy || ocrFixBusy || !ocrDraft;
@@ -2139,8 +2140,8 @@
       showOcrStatus("只支持 PNG / JPG / BMP 图片，请换一种格式。", "error");
       return;
     }
-    if (ocrProvider === "ollama" && /^image\/bmp$/i.test(file.type || "")) {
-      showOcrStatus("本地识别只支持 PNG / JPG 图片，请换一种格式。", "error");
+    if (ocrProvider !== "simpletex" && /^image\/bmp$/i.test(file.type || "")) {
+      showOcrStatus("当前识题方式只支持 PNG / JPG 图片，请换一种格式。", "error");
       return;
     }
     if (file.size > MAX_OCR_BYTES) {
@@ -2527,14 +2528,33 @@
       if (!data.key_set) {
         status.className = "status bad";
         statusText.textContent = "未配置 API Key";
+        ocrAvailable = false;
+        if (ocrBtn) {
+          ocrBtn.disabled = true;
+          ocrBtn.title = "图片识题不可用：请先在 .env 中配置 OPENAI_API_KEY";
+        }
         return;
       }
       status.className = "status ok";
       statusText.textContent = `模型 · ${data.model || "未命名"}`;
-      ocrProvider = data.ocr_provider || "ollama";
-      if (data.ocr_configured === false && ocrBtn) {
-        ocrBtn.title = "图片识别未配置：请检查 .env 中的 OCR_PROVIDER 配置";
+      ocrProvider = data.ocr_provider || "deepseek";
+      ocrAvailable = data.ocr_available !== false;
+      if (ocrBtn) {
+        ocrBtn.disabled = !ocrAvailable;
+        if (!ocrAvailable) {
+          if (ocrProvider === "ollama") {
+            ocrBtn.title = "图片识题不可用：请先启动本地 Ollama；文字提问仍可用";
+          } else if (ocrProvider === "simpletex") {
+            ocrBtn.title = "图片识题不可用：请检查 SIMPLETEX 配置；文字提问仍可用";
+          } else {
+            ocrBtn.title =
+              "图片识题不可用：请检查 OPENAI_API_KEY / OPENAI_VISION_MODEL；文字提问仍可用";
+          }
+        } else {
+          ocrBtn.title = "上传或粘贴题目图片";
+        }
       }
+      updateControls();
     } catch (err) {
       status.className = "status bad";
       statusText.textContent = "本地服务未连接";

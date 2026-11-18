@@ -47,6 +47,62 @@ def ollama_env(monkeypatch):
     return config
 
 
+@pytest.fixture
+def deepseek_env(monkeypatch):
+    """DeepSeek 视觉配置：复用 OpenAI Key，不发真实请求。"""
+    monkeypatch.setattr(config, "OCR_PROVIDER", "deepseek")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setattr(config, "OPENAI_VISION_MODEL", "deepseek-flash")
+    return config
+
+
+class FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeChoice:
+    def __init__(self, content):
+        self.message = FakeMessage(content)
+
+
+class FakeCompletionResponse:
+    def __init__(self, content):
+        self.choices = [FakeChoice(content)]
+
+
+class FakeCompletions:
+    def __init__(self, content="题目：$\\frac{1}{2}$", exc=None):
+        self.content = content
+        self.exc = exc
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.exc is not None:
+            raise self.exc
+        return FakeCompletionResponse(self.content)
+
+
+class FakeOpenAI:
+    last = None
+
+    def __init__(self, **kwargs):
+        self.init_kwargs = kwargs
+        self.completions = FakeCompletions()
+        self.chat = type("Chat", (), {"completions": self.completions})()
+        FakeOpenAI.last = self
+
+
+def install_deepseek(monkeypatch, content="题目：$\\frac{1}{2}$", exc=None):
+    client = FakeOpenAI()
+    client.completions.content = content
+    client.completions.exc = exc
+    monkeypatch.setattr(ocr, "OpenAI", lambda **kwargs: client)
+    return client
+
+
 class FakeResponse:
     def __init__(self, payload, status_code=200, reason_phrase="OK"):
         self._payload = payload
@@ -511,3 +567,93 @@ def test_invalid_provider(monkeypatch):
         ocr.recognize(PNG)
 
     assert "OCR_PROVIDER" in str(exc.value)
+
+
+# ---------- DeepSeek 视觉 ----------
+
+def test_deepseek_is_configured_and_available(deepseek_env, monkeypatch):
+    assert ocr.get_provider() == "deepseek"
+    assert ocr.is_configured() is True
+    assert ocr.is_available() is True
+
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+    assert ocr.is_configured() is False
+    assert ocr.is_available() is False
+
+
+def test_deepseek_recognize_sends_image(deepseek_env, monkeypatch):
+    client = install_deepseek(monkeypatch, content="  ```markdown\n题目 $x$\n```  ")
+
+    result = ocr.recognize(PNG)
+
+    assert result.text == "题目 $x$"
+    assert result.mode == "deepseek:deepseek-flash"
+    call = client.completions.calls[0]
+    assert call["model"] == "deepseek-flash"
+    assert call["messages"][0]["role"] == "system"
+    user = call["messages"][1]
+    assert user["content"][0]["type"] == "text"
+    image = user["content"][1]
+    assert image["type"] == "image_url"
+    assert image["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_deepseek_rejects_bmp(deepseek_env, monkeypatch):
+    client = install_deepseek(monkeypatch)
+
+    with pytest.raises(ocr.OcrError) as exc:
+        ocr.recognize(BMP)
+
+    assert "PNG / JPG" in str(exc.value)
+    assert client.completions.calls == []
+
+
+class AuthenticationError(Exception):
+    pass
+
+
+class APIConnectionError(Exception):
+    pass
+
+
+def test_deepseek_authentication_error(deepseek_env, monkeypatch):
+    install_deepseek(monkeypatch, exc=AuthenticationError("bad key"))
+
+    with pytest.raises(ocr.OcrError) as exc:
+        ocr.recognize(PNG)
+
+    assert "鉴权失败" in str(exc.value)
+    assert "sk-test" not in str(exc.value)
+
+
+def test_deepseek_connection_error(deepseek_env, monkeypatch):
+    install_deepseek(monkeypatch, exc=APIConnectionError("offline"))
+
+    with pytest.raises(ocr.OcrError) as exc:
+        ocr.recognize(PNG)
+
+    assert "无法连接 DeepSeek API" in str(exc.value)
+
+
+def test_deepseek_empty_response(deepseek_env, monkeypatch):
+    install_deepseek(monkeypatch, content="   ")
+
+    with pytest.raises(ocr.OcrError) as exc:
+        ocr.recognize(PNG)
+
+    assert "没有返回识别结果" in str(exc.value)
+
+
+def test_ollama_is_available_probes_server(ollama_env, monkeypatch):
+    monkeypatch.setattr(
+        ocr.httpx,
+        "get",
+        lambda *args, **kwargs: FakeResponse({}, status_code=200),
+    )
+    assert ocr.is_available() is True
+
+    def offline(*args, **kwargs):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(ocr.httpx, "get", offline)
+    assert ocr.is_available() is False

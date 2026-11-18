@@ -898,6 +898,7 @@ def health() -> dict:
         "model": config.OPENAI_MODEL,
         "key_set": bool(config.OPENAI_API_KEY.strip()),
         "ocr_configured": ocr.is_configured(),
+        "ocr_available": ocr.is_available(),
         "ocr_provider": ocr.get_provider(),
         "papers_available": index_available(),
         "sessions": SESSIONS.size(),
@@ -966,7 +967,12 @@ def recognize_image(file: UploadFile = File(...)) -> OcrResponse:
     """
     if not ocr.is_configured():
         provider = ocr.get_provider()
-        if provider == "simpletex":
+        if provider == "deepseek":
+            detail = (
+                "服务端未配置图片识别：请在 .env 中填写 OPENAI_API_KEY，"
+                "并确认 OPENAI_VISION_MODEL=deepseek-flash，然后重启服务。"
+            )
+        elif provider == "simpletex":
             detail = (
                 "服务端未配置图片识别：请在 .env 中填写 SIMPLETEX_TOKEN，"
                 "或同时填写 SIMPLETEX_APP_ID 与 SIMPLETEX_APP_SECRET，"
@@ -975,7 +981,7 @@ def recognize_image(file: UploadFile = File(...)) -> OcrResponse:
         else:
             detail = (
                 f"服务端图片识别配置无效（OCR_PROVIDER={provider!r}），"
-                "可选 ollama / simpletex。"
+                "可选 deepseek / ollama / simpletex。"
             )
         raise HTTPException(status_code=503, detail=detail)
 

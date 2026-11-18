@@ -1,12 +1,16 @@
 """图片识题：把题目截图转成 Markdown + LaTeX 文本。
 
-支持两个提供方，由 OCR_PROVIDER 选择：
+支持三个提供方，由 OCR_PROVIDER 选择：
 
-    ollama（默认）
+    deepseek（默认）
+        调用 DeepSeek 的视觉模型（默认 deepseek-flash），复用
+        OPENAI_API_KEY / OPENAI_BASE_URL。用户不需要安装 Ollama；
+        图片会发送到 DeepSeek，并按 token 计费。
+    ollama
         调用本机 Ollama 的视觉模型（默认 glm-ocr，0.9B，约 2.7 GB）。
         完全免费、图片不出本机；需要先安装 Ollama 并 pull 模型。
     simpletex
-        第三方云端 OCR，需要 token 或 APP ID/SECRET；图片会离开本机，
+        第三方云端数学 OCR，需要 token 或 APP ID/SECRET；图片会离开本机，
         并按账户额度计费。
 
 设计边界：
@@ -50,6 +54,7 @@ import time
 from dataclasses import dataclass
 
 import httpx
+from openai import OpenAI
 from PIL import Image, ImageOps
 
 import config
@@ -61,6 +66,17 @@ REQUEST_TIMEOUT = 60.0
 # GLM-OCR 的整页识别提示。模型按任务前缀训练，改写成自然语言可能降低
 # 稳定性；需要换模型时通过 OLLAMA_OCR_PROMPT 覆盖。
 DEFAULT_OLLAMA_PROMPT = "Text Recognition:"
+
+# DeepSeek 视觉模型的识题提示。只做 OCR，不要求它解题；看不清的符号
+# 让模型显式标记，避免它为了“通顺”猜一个错误公式。
+DEFAULT_DEEPSEEK_PROMPT = r"""你是一名数学题目 OCR。请把图片中的题目完整识别为 Markdown + LaTeX。
+
+要求：
+1. 保留题号、题干、选项和中文说明，不要漏掉小问；
+2. 行内公式用 $...$，独立公式用 $$...$$；
+3. 不要解题，不要补充图片中没有的条件或结论；
+4. 看不清的符号写成 [?]，不要猜；
+5. 只输出识别结果，不要 Markdown 代码块，不要额外解释。"""
 
 # 小图放大。模型内部会把图片缩到固定的视觉分辨率，整页大图再放大没有
 # 收益；但单题裁剪图（约 1300px 宽）里的小符号会认错，实测 2025 年第 1
@@ -106,7 +122,7 @@ class OcrResult:
 
 def get_provider() -> str:
     """当前图片识别提供方；未知值原样返回，由 recognize 报配置错误。"""
-    return config.OCR_PROVIDER.strip().lower() or "ollama"
+    return config.OCR_PROVIDER.strip().lower() or "deepseek"
 
 
 def is_configured() -> bool:
@@ -116,6 +132,10 @@ def is_configured() -> bool:
     所以这里只检查提供方名字；缺模型时由 recognize 给出 pull 提示。
     """
     provider = get_provider()
+    if provider == "deepseek":
+        return bool(config.OPENAI_API_KEY.strip()) and bool(
+            config.OPENAI_VISION_MODEL.strip()
+        )
     if provider == "ollama":
         return True
     if provider == "simpletex":
@@ -123,6 +143,22 @@ def is_configured() -> bool:
             config.SIMPLETEX_APP_ID.strip() and config.SIMPLETEX_APP_SECRET.strip()
         )
     return False
+
+
+def is_available() -> bool:
+    """给 /api/health 用的“现在能不能识图”。
+
+    云端提供方只看配置；Ollama 需要额外探测本地服务，避免用户上传图片后
+    才看到红色连接错误。探测只等 1 秒，失败即视为不可用。
+    """
+    provider = get_provider()
+    if provider != "ollama":
+        return is_configured()
+    try:
+        response = httpx.get(f"{config.OLLAMA_HOST}/api/tags", timeout=1.0)
+        return response.status_code == 200
+    except Exception:
+        return False
 
 
 def auth_headers(
@@ -207,7 +243,7 @@ def validate_image(
         names = " / ".join(
             name.upper() for name in ("png", "jpg", "bmp") if name in allowed
         )
-        raise OcrError(f"本地识别只支持 {names} 图片，请换一种格式。")
+        raise OcrError(f"图片识别只支持 {names} 图片，请换一种格式。")
     return detected
 
 
@@ -321,6 +357,66 @@ def _prepare_image(image: bytes, extension: str) -> bytes:
     except Exception:
         # 图片能通过文件头校验但 Pillow 解不开时，交给模型自己判断
         return image
+
+
+def _recognize_deepseek(image: bytes) -> OcrResult:
+    """调用 DeepSeek 兼容接口的视觉模型做整页识别。
+
+    复用 OPENAI_API_KEY / OPENAI_BASE_URL，不额外保存 Key；图片以 base64
+    data URL 放进 OpenAI 兼容的 image_url 块。DeepSeek 官方文档当前列出的
+    视觉模型是 deepseek-flash（具体以 OPENAI_VISION_MODEL 为准）。
+    """
+    extension, mime = validate_image(image, allowed={"png", "jpg"})
+    image = _prepare_image(image, extension)
+    model = config.OPENAI_VISION_MODEL.strip() or "deepseek-flash"
+    data_url = f"data:{mime};base64,{base64.b64encode(image).decode('ascii')}"
+
+    client = OpenAI(
+        api_key=config.OPENAI_API_KEY,
+        base_url=config.OPENAI_BASE_URL or None,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": DEFAULT_DEEPSEEK_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请识别这张图片中的题目。"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                    ],
+                },
+            ],
+            timeout=REQUEST_TIMEOUT,
+            max_tokens=4096,
+            # deepseek-flash 默认会先产生一大段 reasoning；OCR 不需要思考过程，
+            # 关掉后既省 token，也避免 reasoning 占满预算导致正文为空。
+            reasoning_effort="none",
+        )
+    except Exception as exc:
+        name = type(exc).__name__
+        detail = str(exc)
+        lowered = f"{name} {detail}".lower()
+        if "authentication" in lowered or "401" in detail:
+            raise OcrError(
+                "DeepSeek 鉴权失败，请检查 OPENAI_API_KEY 是否正确。"
+            ) from exc
+        if "connection" in lowered or "connect" in lowered:
+            raise OcrError(
+                "无法连接 DeepSeek API，请检查网络和 OPENAI_BASE_URL。"
+            ) from exc
+        raise OcrError(f"DeepSeek 识图失败（{name}）：{detail[:200]}") from exc
+
+    message = response.choices[0].message if response.choices else None
+    text = _find_text(message.content if message else "")
+    text = _clean_ocr_text(text)
+    if not text:
+        raise OcrError("DeepSeek 没有返回识别结果，请换一张更清晰的图片。")
+    return OcrResult(text=text, mode=f"deepseek:{model}")
 
 
 def _recognize_ollama(image: bytes) -> OcrResult:
@@ -485,11 +581,13 @@ def recognize(image: bytes) -> OcrResult:
         OcrError: 配置无效、格式不支持、模型/服务失败或返回空文本。
     """
     provider = get_provider()
+    if provider == "deepseek":
+        return _recognize_deepseek(image)
     if provider == "ollama":
         return _recognize_ollama(image)
     if provider == "simpletex":
         return _recognize_simpletex(image)
     raise OcrError(
         f"OCR_PROVIDER 配置无效（{config.OCR_PROVIDER!r}），"
-        "可选 ollama / simpletex。"
+        "可选 deepseek / ollama / simpletex。"
     )

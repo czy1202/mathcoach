@@ -9,7 +9,8 @@
 ## 项目规格
 
 - 输入：文字题目（自然语言或 LaTeX）；Web 版可选上传/粘贴题目截图，
-  经本地 GLM-OCR（Ollama，免费）整页识别成可编辑文本后再解题
+  默认经 DeepSeek 视觉模型（`deepseek-flash`）整页识别成可编辑文本后再解题；
+  也支持本地 Ollama / SimpleTex 作为备选
 - 输出：
   1. 涉及的知识点
   2. 解题思路
@@ -34,11 +35,16 @@ pip install -r requirements.txt
 
 # 配置模型：.env 已被 .gitignore 忽略，不要提交
 copy .env.example .env
-# 填入 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL
+# 填入用户自己的 OPENAI_API_KEY（DeepSeek Key）。
+# 默认解题和图片识题都使用 deepseek-flash；如果要分开：
+#   OPENAI_MODEL=deepseek-flash
+#   OPENAI_VISION_MODEL=deepseek-flash
+#   OCR_PROVIDER=deepseek
 
-# 可选：本地图片识题（免费）
-ollama pull glm-ocr                         # 约 2.7 GB，只需下载一次
-ollama serve                                # 或直接打开 Ollama 应用
+# 不需要安装 Ollama，也不需要自己的服务器。
+# 可选：如果更想用本机免费 OCR，再安装 Ollama：
+# ollama pull glm-ocr                       # 约 2.7 GB，只需下载一次
+# ollama serve                              # 或直接打开 Ollama 应用
 
 python ask.py "计算 lim(x→0) sin x / x"   # 真实模型一问一答
 python ask.py                              # 连续提问模式，exit 退出
@@ -56,7 +62,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 427 个测试
+pytest                              # 435 个测试
 ```
 
 `eval.run_eval` 的常用开关：
@@ -79,11 +85,28 @@ python -m web.app
 只监听 `127.0.0.1`，不需要登录；API Key 留在服务端 `.env`，浏览器拿不到。
 同一时间最多处理 2 道题，超过会直接返回 429，避免本地演示时并发消耗额度。
 
-图片识题默认走本机 Ollama，免费、无需 API Key，图片不会离开本机：
+图片识题默认复用 DeepSeek 视觉模型（`deepseek-flash`），和解题共用一个
+`OPENAI_API_KEY`，用户不需要安装 Ollama：
 
 ```bash
-ollama pull glm-ocr      # 约 2.7 GB，只需下载一次
-ollama serve             # 或直接打开 Ollama 应用
+OPENAI_API_KEY=用户自己的 DeepSeek Key
+OPENAI_BASE_URL=https://api.deepseek.com
+OPENAI_MODEL=deepseek-flash
+OPENAI_VISION_MODEL=deepseek-flash
+OCR_PROVIDER=deepseek
+```
+
+图片会发送到 DeepSeek，并按 token 计费（官方文档按约 1024 tokens/张估算）。
+如果不想用云端，也可以切到本机 Ollama 或 SimpleTex：
+
+```bash
+# 备选一：本机 Ollama，免费、图片不出本机
+OCR_PROVIDER=ollama
+# ollama pull glm-ocr && ollama serve
+
+# 备选二：SimpleTex 数学 OCR
+OCR_PROVIDER=simpletex
+SIMPLETEX_TOKEN=用户自己的令牌
 ```
 
 之后点击输入框左侧的图片按钮，或直接 `Ctrl+V` 粘贴截图即可。识别结果会生成一张
@@ -95,10 +118,8 @@ ollama serve             # 或直接打开 Ollama 应用
 识别结果**不会自动提交**，整页图里的细小根号/上标更容易认错，时间也明显更长；
 只问一道题时，先裁到题目范围再上传更稳。服务端不主动保存图片、不写 trace。
 
-如果更想用云端识别，可在 `.env` 里设 `OCR_PROVIDER=simpletex`，再填
-`SIMPLETEX_TOKEN`（用户中心生成的授权令牌），或同时填
-`SIMPLETEX_APP_ID` + `SIMPLETEX_APP_SECRET`。注意 SimpleTex 会收到图片，
-并按账户额度计费。
+如果 `ocr_available=false`（没有配置 OCR Key，或本机 Ollama 未启动），页面会
+禁用图片按钮并提示“文字提问仍可用”，不会等用户上传后才弹红色错误。
 
 页面能力：
 
@@ -126,8 +147,8 @@ ollama serve             # 或直接打开 Ollama 应用
   点击后右侧显示该卷全部题干；原始题干直接来自题库，展示时优先使用构建阶段
   缓存的 `display_question`，不额外调用模型。每道题下有“显示答案”按钮，
   展开后可看官方答案与参考解答（未收录的题会明确提示）
-- 图片识题：上传或 `Ctrl+V` 粘贴截图（本地 GLM-OCR 支持 PNG / JPG；
-  云端 SimpleTex 额外支持 BMP），识别后生成“原图 + 排版题目”的题目卡。
+- 图片识题：上传或 `Ctrl+V` 粘贴截图（DeepSeek 视觉和本地 GLM-OCR 支持
+  PNG / JPG；云端 SimpleTex 额外支持 BMP），识别后生成“原图 + 排版题目”的题目卡。
   公式默认按 KaTeX 渲染，不向普通用户暴露整段 LaTeX：点击单个公式会打开
   带实时预览和符号按钮的编辑器；高级用户可以切到“编辑源码”，先看
   “公式 ↔ 源码”对照表再整段修改。题目卡下方还有大白话纠错框：用户直接说
@@ -559,7 +580,7 @@ mathcoach/
 ├── tracing.py          # TraceRecorder：逐题写 JSONL
 ├── schemas.py          # Verdict 等数据结构
 ├── config.py           # 读取 .env
-├── ocr.py              # 图片识题：本地 Ollama / GLM-OCR（默认）+ SimpleTex 备选
+├── ocr.py              # 图片识题：DeepSeek 视觉（默认）/ 本地 Ollama / SimpleTex
 ├── rag/
 │   ├── build.py        # PDF -> JSONL 构建入口
 │   ├── papers.py       # 试卷版式解析、去重
@@ -591,7 +612,7 @@ mathcoach/
 │   └── trace_report.py # 轨迹汇总
 ├── test_agent.py
 ├── test_ask.py
-├── test_ocr.py         # 本地 Ollama / SimpleTex：鉴权、图片格式、二次校对与错误处理
+├── test_ocr.py         # DeepSeek / Ollama / SimpleTex：鉴权、图片格式、二次校对与错误处理
 ├── test_rag.py
 ├── test_solution.py    # 分步解答解析（标题、代码块、乱序编号）
 ├── test_vector.py      # 向量索引、RRF、工具回退
@@ -604,10 +625,11 @@ mathcoach/
 - 官方答案只覆盖初赛（212/222），第 13 届补赛 10 题和全部决赛没有可用来源；
   答案是扫描件 OCR + 模型摘录的结果，公式可能有识别错误，重要结论应以原卷
   和官方答案为准。答案只进入“查看真题”页面，不参与解题与评测。
-- 图片识题默认依赖本机 Ollama + GLM-OCR（约 2.7 GB）：需要机器有足够内存/显存，
-  首次调用要加载模型会明显变慢；手写体、低分辨率或复杂排版的识别仍可能出错，
-  结果必须人工核对。本地路线只支持 PNG / JPG，单张上限 10 MB；
-  整页识别暂不自动切分题目。切到 SimpleTex 时图片会发送到外部服务并按额度计费。
+- 图片识题默认把图片发送到 DeepSeek（`deepseek-flash`），需要用户自己的
+  API Key，并按 token 计费；手写体、低分辨率或复杂排版的识别仍可能出错，
+  结果必须人工核对。也可以切到本机 Ollama（免费但需安装约 2.7 GB 模型）或
+  SimpleTex（云端数学 OCR，按额度计费）。DeepSeek / 本地路线只支持 PNG / JPG，
+  单张上限 10 MB；整页识别暂不自动切分题目。
 - `sympy.parse_expr` 最终仍会执行字符串表达式。现在已限制到数学函数/常量的
   命名空间，并拒绝属性访问、分号、引号等非数学语法；这能挡住常见注入，
   但不是独立沙箱。接入不可信公网输入前，仍应放到进程/容器级隔离中解析。
