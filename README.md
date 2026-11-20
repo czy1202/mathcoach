@@ -104,7 +104,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 436 个测试
+pytest                              # 450 个测试
 ```
 
 如果要重建知识库（仓库不包含 PDF）：
@@ -174,6 +174,9 @@ SIMPLETEX_TOKEN=用户自己的令牌
 页面能力：
 
 - 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
+- 输入框上方可开启「深度检查」：Planner → Solver → Verifier 多 Agent，
+  页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、复核结论和耗时；
+  默认关闭，开启后 token 和延迟会增加
 - 解题模式：Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
 - 解题模式：回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
 - 求解等待期间显示「停止」按钮：浏览器立即恢复输入，同时通知服务端在
@@ -224,6 +227,9 @@ SIMPLETEX_TOKEN=用户自己的令牌
   响应会返回服务端生成的 id，后续追问带同一个 id。如果模型调用了
   `list_past_problems`，响应会额外带上完整试卷 `paper`；完整解答还会返回
   `turn_id`（稳定定位本轮回答）和 `solution`（`intro` / `steps` / `outro`）
+- `POST /api/ask-multi`：请求体 `{question}`，返回 `text/event-stream`。
+  依次推送 `stage` 事件（planner / solver / verifier / revision）和 `final` 事件；
+  单题模式，不写会话，适合页面上的“深度检查”开关
 - `POST /api/ask-step`：针对某一轮回答中的某一步追问。请求体为
   `{question, parent_session_id, parent_turn_id?, parent_turn?, step_index,
   step_text?, step_session_id?}`；响应只包含这一步的短回答和独立的
@@ -578,6 +584,26 @@ Agent 循环（最多 15 步，单步 30 秒超时）
 最终回答（知识点 / 思路 / 步骤 / 最终答案）
 ```
 
+深度检查（可选，多 Agent）：
+
+```text
+题目
+  │
+  ▼
+Planner（题型 / 知识点 / 缺失条件 / 策略 / 检索 query）
+  │
+  ├─ 信息缺失 → 直接要求补充
+  ▼
+Solver（复用单 Agent 循环，按 Plan 执行）
+  │
+  ▼
+Verifier（独立上下文，只看题目 + 候选解答）
+  │
+  ├─ PASS → 输出
+  ├─ FAIL 且未超重解 → 反馈 issues → Solver 定向重解 → 再复核
+  └─ UNCERTAIN / 超限 → 输出并标注警告
+```
+
 评测链路：
 
 ```text
@@ -632,7 +658,9 @@ mathcoach/
 ├── models/
 │   └── bge-small-zh-v1.5/  # BGE 模型（Git LFS）
 ├── ask.py              # 命令行一问一答入口（最小产品壳）
-├── agent.py            # Agent 循环、超时/步数护栏、轨迹事件
+├── agent.py            # 单 Agent 循环、超时/步数护栏、轨迹事件
+├── contracts.py        # 多 Agent 结构化契约：Plan / Draft / Review / Budget
+├── multi_agent.py      # Planner → Solver → Verifier 确定性状态机
 ├── llm.py              # OpenAI 兼容客户端 + StubClient（同一接口）
 ├── tools.py            # sympy 验证 + 真题检索/列卷工具、注册表、run_tool 分派
 ├── mathparse.py        # LaTeX / Unicode / 省略乘号的统一归一化
@@ -656,10 +684,11 @@ mathcoach/
 │   └── search.py       # 命令行检索
 ├── data/               # 本地构建产物、OCR 中间文件、会话库（已 gitignore）
 ├── web/
-│   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-step、/api/ocr、/api/papers
+│   ├── app.py          # FastAPI 后端：/api/ask、/api/ask-multi、/api/ask-step、/api/ocr、/api/papers
 │   ├── sessions.py     # 会话存储：内存 + SQLite、TTL、上下文裁剪、请求占用
 │   ├── test_app.py
 │   ├── test_ocr.py     # /api/ocr + /api/ocr/fix：配置、格式、失败映射、并发保护
+│   ├── test_multi.py   # /api/ask-multi：SSE 阶段事件与 final
 │   ├── test_sessions.py
 │   └── static/         # 单页前端；KaTeX / marked / DOMPurify 本地化
 ├── eval/
@@ -672,6 +701,8 @@ mathcoach/
 │   └── trace_report.py # 轨迹汇总
 ├── test_agent.py
 ├── test_ask.py
+├── test_contracts.py   # Plan / Review JSON 解析
+├── test_multi_agent.py # 多 Agent 状态机：PASS / 重解 / 拒答 / 预算
 ├── test_ocr.py         # DeepSeek / Ollama / SimpleTex：鉴权、图片格式、二次校对与错误处理
 ├── test_rag.py
 ├── test_solution.py    # 分步解答解析（标题、代码块、乱序编号）
@@ -690,6 +721,9 @@ mathcoach/
   结果必须人工核对。也可以切到本机 Ollama（免费但需安装约 2.7 GB 模型）或
   SimpleTex（云端数学 OCR，按额度计费）。DeepSeek / 本地路线只支持 PNG / JPG，
   单张上限 10 MB；整页识别暂不自动切分题目。
+- 多 Agent 深度检查默认关闭，且目前是单题模式：不写会话、不支持步骤追问。
+  Planner / Verifier 与 Solver 使用同一模型，仍可能存在共同盲区；34 题上的
+  多配置消融还要继续跑，当前不能把“多 Agent 一定更好”当成结论。
 - `sympy.parse_expr` 最终仍会执行字符串表达式。现在已限制到数学函数/常量的
   命名空间，并拒绝属性访问、分号、引号等非数学语法；这能挡住常见注入，
   但不是独立沙箱。接入不可信公网输入前，仍应放到进程/容器级隔离中解析。

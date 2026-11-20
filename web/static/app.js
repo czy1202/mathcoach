@@ -59,6 +59,7 @@
   const formulaSave = document.getElementById("formula-save");
   const formulaCancel = document.getElementById("formula-cancel");
   const formulaClose = document.getElementById("formula-close");
+  const deepModeToggle = document.getElementById("deep-mode");
 
   const DEFAULT_PLACEHOLDER = input.placeholder;
   const DRAFT_PLACEHOLDER = "可补充说明（可选），例如：只做第 (2) 问";
@@ -603,6 +604,202 @@
       label.textContent = `正在分析题目并调用工具验证… ${seconds}s`;
     }, 100);
     return article;
+  }
+
+  const AGENT_STAGES = [
+    { key: "planner", label: "Planner", desc: "规划" },
+    { key: "solver", label: "Solver", desc: "解题" },
+    { key: "verifier", label: "Verifier", desc: "复核" },
+    { key: "revision", label: "Revision", desc: "重解" },
+  ];
+
+  function createAgentProgress() {
+    const article = document.createElement("article");
+    article.className = "message assistant";
+    article.innerHTML = `
+      <div class="avatar">∑</div>
+      <div class="bubble">
+        <div class="agent-progress">
+          <div class="agent-progress-head">
+            <span class="spinner"></span>
+            <span class="agent-current" data-label="正在启动多 Agent">正在启动多 Agent…</span>
+          </div>
+          <div class="agent-steps">
+            ${AGENT_STAGES.map((stage) => `
+              <div class="agent-step" data-stage="${stage.key}">
+                <div class="agent-step-name">
+                  <span class="agent-step-dot"></span>${stage.label}
+                </div>
+                <div class="agent-step-desc">${stage.desc}</div>
+              </div>`).join("")}
+          </div>
+          <div class="agent-progress-detail"></div>
+        </div>
+      </div>`;
+
+    const started = performance.now();
+    article._started = started;
+    article._timer = setInterval(() => {
+      const current = article.querySelector(".agent-current");
+      if (!current) return;
+      const label = current.dataset.label || "多 Agent";
+      current.textContent = `${label} · ${((performance.now() - started) / 1000).toFixed(1)}s`;
+    }, 100);
+    return article;
+  }
+
+  function updateAgentProgress(article, event) {
+    if (!article || event.type !== "stage") return;
+    const current = article.querySelector(".agent-current");
+    const detail = article.querySelector(".agent-progress-detail");
+    const stage = event.stage;
+    if (stage === "done") {
+      if (current) current.textContent = "多 Agent 完成";
+      return;
+    }
+
+    const node = article.querySelector(`[data-stage="${stage}"]`);
+    if (node) {
+      node.classList.remove("running", "done", "error");
+      if (event.status === "running") node.classList.add("running");
+      else if (event.status === "error" || event.status === "refused") {
+        node.classList.add("error");
+      } else {
+        node.classList.add("done");
+      }
+      const desc = node.querySelector(".agent-step-desc");
+      if (desc && event.detail) desc.textContent = event.detail;
+    }
+
+    if (current) {
+      const labels = {
+        planner: "Planner",
+        solver: "Solver",
+        verifier: "Verifier",
+        revision: "Revision",
+      };
+      const statusText =
+        event.status === "running" ? "进行中"
+          : event.status === "done" ? "完成"
+            : event.status;
+      current.dataset.label = `${labels[stage] || stage} · ${statusText}`;
+    }
+    if (detail && event.detail) detail.textContent = event.detail;
+  }
+
+  async function submitMultiQuestion(question) {
+    const requestId = newRequestId();
+    const controller = new AbortController();
+    solveRequestId = requestId;
+    solveAbort = controller;
+
+    clearOcrStatus();
+    clearOcrDraft();
+    setBusy(true);
+    hideWelcome();
+    appendUser(question);
+    input.value = "";
+    resizeInput();
+
+    const progress = createAgentProgress();
+    chat.appendChild(progress);
+    scrollToBottom();
+
+    let finished = false;
+    try {
+      const response = await fetch("/api/ask-multi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ question }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(errorText(data.detail, response.status));
+      }
+      if (!response.body) throw new Error("浏览器不支持流式响应。");
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let split;
+        while ((split = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          for (const line of chunk.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            const raw = line.slice(5).trim();
+            if (!raw) continue;
+            let event;
+            try {
+              event = JSON.parse(raw);
+            } catch (_) {
+              continue;
+            }
+
+            if (event.type === "final") {
+              clearInterval(progress._timer);
+              finished = true;
+              const data = {
+                ...event,
+                // 深度模式不写会话，隐藏“问这一步”入口，避免追问落到空会话。
+                solution: null,
+                session_id: sessionId,
+              };
+              const message = createAssistantMessage(data);
+              const meta = message.querySelector(".meta");
+              if (meta) {
+                meta.textContent =
+                  `多 Agent · 耗时 ${Number(event.elapsed || 0).toFixed(1)}s`
+                  + ` · 重解 ${event.revisions || 0} 次`
+                  + ` · 复核 ${event.verdict || "uncertain"}`;
+              }
+              if (event.warning) {
+                const note = document.createElement("div");
+                note.className = "notice-box";
+                note.textContent = `复核提示：${event.warning}`;
+                message.querySelector(".bubble").appendChild(note);
+              }
+              progress.replaceWith(message);
+              scrollToElement(message);
+            } else if (event.type === "error") {
+              clearInterval(progress._timer);
+              finished = true;
+              progress.replaceWith(
+                createErrorMessage(event.message || "多 Agent 求解失败。"),
+              );
+            } else {
+              updateAgentProgress(progress, event);
+            }
+          }
+        }
+      }
+
+      if (!finished) {
+        clearInterval(progress._timer);
+        progress.replaceWith(
+          createNoticeMessage("多 Agent 连接结束，但没有收到最终答案。"),
+        );
+      }
+    } catch (err) {
+      clearInterval(progress._timer);
+      if (controller.signal.aborted) {
+        progress.replaceWith(createNoticeMessage("已停止生成。"));
+      } else {
+        progress.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
+      }
+    } finally {
+      if (solveAbort === controller) solveAbort = null;
+      if (solveRequestId === requestId) solveRequestId = "";
+      setBusy(false);
+      input.focus();
+    }
   }
 
   function buildTrace(data) {
@@ -2240,6 +2437,11 @@
       .filter(Boolean)
       .join("\n\n");
     if (!question || busy || ocrBusy || ocrFixBusy) return;
+
+    if (deepModeToggle && deepModeToggle.checked) {
+      await submitMultiQuestion(question);
+      return;
+    }
 
     const requestId = newRequestId();
     const controller = new AbortController();

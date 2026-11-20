@@ -11,8 +11,10 @@
 4. 每道题写一条 trace，返回耗时、token 和工具调用摘要。
 """
 
+import asyncio
 import json
 import os
+import queue
 import re
 import threading
 import time
@@ -20,15 +22,17 @@ import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import config
 import ocr
 from agent import CANCELLED_MESSAGE, Agent
+from contracts import Budget
 from eval.extract import extract_final_answer, extract_final_answer_display
 from llm import OpenAIClient
+from multi_agent import Orchestrator, Planner, Solver, Verifier
 from rag.latex import LatexStore
 from solution import extract_solution_steps
 from tools import (
@@ -271,6 +275,17 @@ class CancelRequest(BaseModel):
     """取消一次正在进行的求解请求。"""
 
     request_id: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+class MultiAskRequest(BaseModel):
+    """多 Agent 深度检查请求（单题，不写会话）。"""
+
+    question: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_QUESTION_CHARS,
+        description="用户输入的题目文本",
+    )
 
 
 class OcrResponse(BaseModel):
@@ -1293,6 +1308,89 @@ def ask(req: AskRequest) -> AskResponse:
                 SESSIONS.end_request(session, request_key)
         drop_cancel(req.request_id, cancel_event)
         _slots.release()
+
+
+@app.post("/api/ask-multi")
+def ask_multi(req: MultiAskRequest):
+    """Planner → Solver → Verifier 深度检查，SSE 推送阶段进度。
+
+    这是单题模式，不写会话；普通解题仍走 /api/ask。
+    """
+    question = req.question.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="题目不能为空。")
+    if not config.OPENAI_API_KEY.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未配置 OPENAI_API_KEY，请在项目根目录 .env 中填写后重启。",
+        )
+    if not _slots.acquire(timeout=0.5):
+        raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
+
+    client = get_client()
+    retrieval = index_available()
+    trace_path = new_trace_file(TRACE_DIR, prefix="multi")
+    tracer = TraceRecorder(case_id="multi", question=question, path=trace_path)
+    events: queue.Queue = queue.Queue()
+
+    def emit(event: dict) -> None:
+        if event.get("type") == "final":
+            answer = str(event.get("answer") or "")
+            normalized = normalize_math_delimiters(answer)
+            display = strip_answer_marker(normalized)
+            event["display_answer"] = display
+            event["final_answer_display"] = extract_final_answer_display(
+                normalized, allow_fallback=True
+            )
+            solution = parse_solution(display)
+            event["solution"] = solution.model_dump() if solution else None
+            event["trace_file"] = trace_path.name
+        events.put(event)
+
+    orchestrator = Orchestrator(
+        Planner(client),
+        Solver(client, retrieval=retrieval),
+        Verifier(client),
+        budget=Budget(),
+        emit=emit,
+        trace=tracer,
+    )
+
+    def run() -> None:
+        result = None
+        try:
+            result = orchestrator.run(question)
+            tracer.finish(
+                request_elapsed=round(result.elapsed, 4),
+                mode="multi",
+                verdict=result.review.verdict.value if result.review else "",
+            )
+        except Exception as exc:
+            events.put({
+                "type": "error",
+                "message": f"多 Agent 求解失败（{type(exc).__name__}: {exc}）",
+            })
+        finally:
+            events.put(None)
+            _slots.release()
+
+    threading.Thread(target=run, daemon=True).start()
+
+    async def stream():
+        while True:
+            event = await asyncio.to_thread(events.get)
+            if event is None:
+                break
+            yield "data: " + json.dumps(event, ensure_ascii=False, default=str) + "\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/ask-step", response_model=StepAskResponse)
