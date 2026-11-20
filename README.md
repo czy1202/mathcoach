@@ -104,7 +104,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 450 个测试
+pytest                              # 451 个测试
 ```
 
 如果要重建知识库（仓库不包含 PDF）：

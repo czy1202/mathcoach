@@ -1390,10 +1390,12 @@ def ask_multi(req: MultiAskRequest):
         else:
             events.put(event)
 
+    # 规划和复核不需要长推理，关掉 reasoning 明显更快；Solver 仍保留默认推理。
+    fast_client = OpenAIClient(reasoning_effort="none")
     orchestrator = Orchestrator(
-        Planner(client),
+        Planner(fast_client),
         Solver(client, retrieval=retrieval),
-        Verifier(client),
+        Verifier(fast_client),
         budget=Budget(),
         emit=emit,
         trace=tracer,
@@ -1636,8 +1638,24 @@ def delete_session(session_id: str) -> dict:
     return {"ok": SESSIONS.reset(session_id)}
 
 
+def _warm_retrieval() -> None:
+    """启动时后台加载题库/BGE，避免第一道题承担模型加载的 8～10 秒。"""
+    try:
+        if not index_available():
+            return
+        load_problem_index()
+        from tools import load_vector_index, vector_available
+
+        if vector_available():
+            load_vector_index()
+    except Exception:
+        # 预热失败不影响正常请求，后续检索会自动回退 BM25
+        pass
+
+
 if __name__ == "__main__":
     import uvicorn
 
+    threading.Thread(target=_warm_retrieval, daemon=True).start()
     # 显式绑定本机地址：没有登录和限流之前，不要暴露到公网
     uvicorn.run(app, host="127.0.0.1", port=8000)

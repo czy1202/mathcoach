@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -19,6 +20,7 @@ from contracts import (
     Budget,
     Draft,
     Plan,
+    QuestionType,
     Review,
     default_plan,
     parse_plan,
@@ -66,8 +68,9 @@ SOLVER_PROMPT = SOLVER_PROMPT_BASE + "\n\n" + RETRIEVAL_PROMPT
 VERIFIER_PROMPT = r"""你是一名完全独立的数学复核员。你没有标准答案，也不要假设考生答案正确。
 
 复核步骤：
-1. 先自己独立解一遍题；关键计算调用 verify_with_sympy 验证，不要只靠心算。
-2. 再把考生答案与你的结果逐步比较：
+1. 只做逻辑与结论审计，不要从头写完整解答，也不要调用工具；
+   数值计算由 Solver 的工具验证负责。
+2. 把考生答案与你的结论逐步比较：
    - 结论一致、推导没有实质缺口 -> pass；
    - 答案不同，或证明存在实质缺口 -> fail；
    - 题目信息不足，或你确实无法确定 -> uncertain。
@@ -107,6 +110,18 @@ def _plan_text(plan: Plan) -> str:
     return "\n".join(lines)
 
 
+def quick_question_type(question: str) -> QuestionType:
+    """规则快速判断题型，避免所有题都先跑一次 Planner。"""
+    text = question.strip()
+    if re.search(r"证明|求证|试证", text):
+        return QuestionType.proof
+    if "选项" in text or re.search(r"(?m)^\s*[A-D][.、]", text):
+        return QuestionType.choice
+    if "____" in text or "填空" in text:
+        return QuestionType.fill
+    return QuestionType.solve
+
+
 def _draft_from_answer(answer: str) -> Draft:
     steps_data = extract_solution_steps(answer) or {}
     steps = [
@@ -142,7 +157,11 @@ class Planner:
 
 
 class Solver:
-    """复用现有 Agent 循环执行计划。"""
+    """复用现有 Agent 循环执行计划。
+
+    准备两套 Agent：带检索和不带检索。简单填空/选择题不加载 BGE、
+    也不多跑一轮检索工具，显著降低首题延迟。
+    """
 
     def __init__(
         self,
@@ -152,14 +171,30 @@ class Solver:
         max_steps: int = 15,
         step_timeout: float = 60.0,
     ) -> None:
-        prompt = SOLVER_PROMPT_BASE + ("\n\n" + RETRIEVAL_PROMPT if retrieval else "")
-        self.agent = Agent(
+        self.retrieval = retrieval
+        self.agent_plain = Agent(
             client=client,
-            retrieval=retrieval,
+            retrieval=False,
             max_steps=max_steps,
             step_timeout=step_timeout,
-            system_prompt=prompt,
+            system_prompt=SOLVER_PROMPT_BASE,
         )
+        self.agent_retrieval = (
+            Agent(
+                client=client,
+                retrieval=True,
+                max_steps=max_steps,
+                step_timeout=step_timeout,
+                system_prompt=SOLVER_PROMPT_BASE + "\n\n" + RETRIEVAL_PROMPT,
+            )
+            if retrieval
+            else self.agent_plain
+        )
+
+    def _agent_for(self, plan: Plan):
+        if self.retrieval and "search_past_problems" in plan.tools_allowed:
+            return self.agent_retrieval
+        return self.agent_plain
 
     def solve(self, question: str, plan: Plan) -> Draft:
         prompt = (
@@ -167,7 +202,7 @@ class Solver:
             f"Planner 给出的计划：\n{_plan_text(plan)}\n\n"
             "请按计划完整求解。"
         )
-        return _draft_from_answer(self.agent.run(prompt))
+        return _draft_from_answer(self._agent_for(plan).run(prompt))
 
     def revise(self, question: str, plan: Plan, draft: Draft, review: Review) -> Draft:
         issues = "\n".join(
@@ -182,39 +217,40 @@ class Solver:
             f"建议修正：{review.suggested_fix or '无'}\n\n"
             "请只针对以上问题修正，未涉及的部分保持不动，重新输出完整解答。"
         )
-        return _draft_from_answer(self.agent.run(prompt))
+        return _draft_from_answer(self._agent_for(plan).run(prompt))
 
 
 class Verifier:
-    """独立上下文复核，只拿题目和候选解答。"""
+    """独立上下文复核，只拿题目和候选解答。
 
-    def __init__(
-        self,
-        client,
-        *,
-        max_steps: int = 20,
-        step_timeout: float = 90.0,
-    ) -> None:
-        self.agent = Agent(
-            client=client,
-            retrieval=False,
-            max_steps=max_steps,
-            step_timeout=step_timeout,
-            system_prompt=VERIFIER_PROMPT,
-        )
+    运行时复核只做一次无工具的快速审计，避免工具调用把延迟拉高；
+    评测期仍使用 eval/verify.py 里带工具的复核器。
+    """
+
+    def __init__(self, client) -> None:
+        self.client = client
 
     def review(self, question: str, draft: Draft) -> Review:
         candidate = draft.answer_text or draft.final_answer
         prompt = (
             f"题目：\n{question}\n\n"
             f"考生解答：\n{candidate}\n\n"
-            "请独立求解并复核，只输出 JSON。"
+            "请独立核对并复核，只输出 JSON。"
         )
-        text = self.agent.run(prompt)
-        return parse_review(text) or Review(
-            verdict=Verdict.UNCERTAIN,
-            suggested_fix="复核器没有按 JSON 格式输出，无法判断。",
-        )
+        try:
+            response = self.client.chat([
+                {"role": "system", "content": VERIFIER_PROMPT},
+                {"role": "user", "content": prompt},
+            ])
+            return parse_review(response.content) or Review(
+                verdict=Verdict.UNCERTAIN,
+                suggested_fix="复核器没有按 JSON 格式输出，无法判断。",
+            )
+        except Exception as exc:
+            return Review(
+                verdict=Verdict.UNCERTAIN,
+                suggested_fix=f"复核失败：{type(exc).__name__}",
+            )
 
 
 @dataclass
@@ -278,27 +314,41 @@ class Orchestrator:
         started = time.perf_counter()
         revisions = 0
 
-        self._stage("planner", "running", "正在判断题型和解题策略")
-        plan = self.planner.plan(question)
-        if plan.missing_info:
-            detail = "；".join(plan.missing_info)
-            self._stage("planner", "refused", f"题干信息不全：{detail}")
-            answer = "题干信息不全，请先补充以下条件：\n" + "\n".join(
-                f"- {item}" for item in plan.missing_info
+        quick_type = quick_question_type(question)
+        if quick_type in (QuestionType.fill, QuestionType.choice):
+            # 填空/选择题通常不需要复杂规划，也不检索真题；直接给默认计划。
+            plan = Plan(
+                question_type=quick_type,
+                approach="直接求解，关键步骤用 sympy 验证。",
+                tools_allowed=["verify_with_sympy"],
+                confidence=0.6,
             )
-            result = MultiAgentResult(
-                answer=answer,
-                plan=plan,
-                refused=True,
-                elapsed=time.perf_counter() - started,
-                stages=self.stages,
+            self._stage(
+                "planner", "done",
+                f"快速识别为 {quick_type.value}，跳过 Planner",
             )
-            self._event("final", **result.to_event())
-            return result
-        self._stage(
-            "planner", "done",
-            f"题型：{plan.question_type.value}；策略：{plan.approach or '直接求解'}",
-        )
+        else:
+            self._stage("planner", "running", "正在判断题型和解题策略")
+            plan = self.planner.plan(question)
+            if plan.missing_info:
+                detail = "；".join(plan.missing_info)
+                self._stage("planner", "refused", f"题干信息不全：{detail}")
+                answer = "题干信息不全，请先补充以下条件：\n" + "\n".join(
+                    f"- {item}" for item in plan.missing_info
+                )
+                result = MultiAgentResult(
+                    answer=answer,
+                    plan=plan,
+                    refused=True,
+                    elapsed=time.perf_counter() - started,
+                    stages=self.stages,
+                )
+                self._event("final", **result.to_event())
+                return result
+            self._stage(
+                "planner", "done",
+                f"题型：{plan.question_type.value}；策略：{plan.approach or '直接求解'}",
+            )
 
         self._stage("solver", "running", "正在按计划解题")
         try:

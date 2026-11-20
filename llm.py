@@ -111,11 +111,17 @@ class OpenAIClient:
         base_url: str | None = None,
         model: str | None = None,
         temperature: float | None = None,
+        reasoning_effort: str | None = None,
     ) -> None:
         """参数为空时回落到 config.py 中读取的 .env 配置。"""
         self.model: str = model or config.OPENAI_MODEL
         self.temperature: float | None = (
             config.OPENAI_TEMPERATURE if temperature is None else temperature
+        )
+        self.reasoning_effort: str | None = (
+            reasoning_effort
+            if reasoning_effort is not None
+            else (config.OPENAI_REASONING_EFFORT or None)
         )
         self._client = OpenAI(
             api_key=api_key or config.OPENAI_API_KEY,
@@ -139,6 +145,8 @@ class OpenAIClient:
         kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
         if tools:
             kwargs["tools"] = tools
 

@@ -79,6 +79,23 @@ def test_pass_path_emits_stage_and_final_events():
     assert events[-1]["verdict"] == "pass"
 
 
+def test_fill_question_skips_planner_and_retrieval_tools():
+    """填空/选择题走快速路径，不调用 Planner，也不要求检索工具。"""
+    events: list[dict] = []
+    planner = FakePlanner(_plan())
+    solver = FakeSolver([_draft("3")])
+    verifier = FakeVerifier([Review(verdict=Verdict.PASS)])
+
+    result = Orchestrator(
+        planner, solver, verifier, emit=events.append
+    ).run("计算极限 ____")
+
+    assert planner.calls == 0
+    assert result.plan.question_type.value == "fill"
+    assert result.plan.tools_allowed == ["verify_with_sympy"]
+    assert any("跳过 Planner" in str(e.get("detail")) for e in events)
+
+
 def test_missing_info_refuses_before_solving():
     events: list[dict] = []
     planner = FakePlanner(_plan(missing_info=["缺少首项 a_1"]))

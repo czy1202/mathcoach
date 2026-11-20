@@ -29,6 +29,10 @@ OPENAI_VISION_MODEL: str = (
 _temperature = os.getenv("OPENAI_TEMPERATURE", "").strip()
 OPENAI_TEMPERATURE: float | None = float(_temperature) if _temperature else None
 
+# DeepSeek 等推理模型默认会先产生一段 reasoning，数学解题需要，但规划/复核
+# 和简单对话会明显变慢。设为 none 可以显著降低延迟；留空则沿用接口默认值。
+OPENAI_REASONING_EFFORT: str = os.getenv("OPENAI_REASONING_EFFORT", "").strip()
+
 # 图片识别提供方：
 #   deepseek  —— 复用 OPENAI_API_KEY / OPENAI_BASE_URL，调用 OPENAI_VISION_MODEL
 #                （默认 deepseek-flash）。用户不需要安装 Ollama。
