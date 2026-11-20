@@ -805,6 +805,61 @@
     }
   }
 
+  async function submitSingleQuestion(question) {
+    const requestId = newRequestId();
+    const controller = new AbortController();
+    solveRequestId = requestId;
+    solveAbort = controller;
+
+    clearOcrStatus();
+    clearOcrDraft();
+    setBusy(true);
+    hideWelcome();
+    const userMessage = appendUser(question);
+    input.value = "";
+    resizeInput();
+
+    const pending = createPending();
+    chat.appendChild(pending);
+    scrollToBottom();
+
+    try {
+      const response = await fetch("/api/ask", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({
+          question,
+          session_id: sessionId,
+          request_id: requestId,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(errorText(data.detail, response.status));
+      }
+      sessionId = data.session_id || sessionId;
+      rememberSession(sessionId);
+      input.placeholder = "继续追问这道题，例如：这一步为什么？";
+      clearInterval(pending._timer);
+      pending.replaceWith(createAssistantMessage(data));
+      scrollToElement(userMessage);
+    } catch (err) {
+      clearInterval(pending._timer);
+      if (controller.signal.aborted) {
+        pending.replaceWith(createNoticeMessage("已停止生成。"));
+      } else {
+        pending.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
+      }
+      scrollToElement(userMessage);
+    } finally {
+      if (solveAbort === controller) solveAbort = null;
+      if (solveRequestId === requestId) solveRequestId = "";
+      setBusy(false);
+      input.focus();
+    }
+  }
+
   function buildTrace(data) {
     const body = document.createElement("div");
     body.className = "trace-body";
@@ -2441,8 +2496,12 @@
       .join("\n\n");
     if (!question || busy || ocrBusy || ocrFixBusy) return;
 
-    // 深度检查默认开启：每次新提问都走 Planner → Solver → Verifier。
-    await submitMultiQuestion(question);
+    // 新题默认走深度检查；同一会话里的追问保留上下文，走单 Agent。
+    if (!sessionId) {
+      await submitMultiQuestion(question);
+    } else {
+      await submitSingleQuestion(question);
+    }
   }
 
   form.addEventListener("submit", (event) => {
