@@ -59,7 +59,6 @@
   const formulaSave = document.getElementById("formula-save");
   const formulaCancel = document.getElementById("formula-cancel");
   const formulaClose = document.getElementById("formula-close");
-  const deepModeToggle = document.getElementById("deep-mode");
 
   const DEFAULT_PLACEHOLDER = input.placeholder;
   const DRAFT_PLACEHOLDER = "可补充说明（可选），例如：只做第 (2) 问";
@@ -711,7 +710,11 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: controller.signal,
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          session_id: sessionId,
+          request_id: requestId,
+        }),
       });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
@@ -746,12 +749,12 @@
             if (event.type === "final") {
               clearInterval(progress._timer);
               finished = true;
-              const data = {
-                ...event,
-                // 深度模式不写会话，隐藏“问这一步”入口，避免追问落到空会话。
-                solution: null,
-                session_id: sessionId,
-              };
+              const data = { ...event };
+              if (data.session_id) {
+                sessionId = data.session_id;
+                rememberSession(sessionId);
+              }
+              input.placeholder = "继续追问这道题，例如：这一步为什么？";
               const message = createAssistantMessage(data);
               const meta = message.querySelector(".meta");
               if (meta) {
@@ -2438,65 +2441,8 @@
       .join("\n\n");
     if (!question || busy || ocrBusy || ocrFixBusy) return;
 
-    if (deepModeToggle && deepModeToggle.checked) {
-      await submitMultiQuestion(question);
-      return;
-    }
-
-    const requestId = newRequestId();
-    const controller = new AbortController();
-    solveRequestId = requestId;
-    solveAbort = controller;
-
-    clearOcrStatus();
-    clearOcrDraft();
-    setBusy(true);
-    hideWelcome();
-    const userMessage = appendUser(question);
-    input.value = "";
-    resizeInput();
-
-    const pending = createPending();
-    chat.appendChild(pending);
-    scrollToBottom();
-
-    try {
-      const response = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          question,
-          session_id: sessionId,
-          request_id: requestId,
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(errorText(data.detail, response.status));
-      }
-      sessionId = data.session_id || sessionId;
-      rememberSession(sessionId);
-      input.placeholder = "继续追问这道题，例如：这一步为什么？";
-      clearInterval(pending._timer);
-      pending.replaceWith(createAssistantMessage(data));
-      // 回滚到用户刚问的那一题，让读者从题目和回答开头看起；
-      // 最终答案卡片仍然在消息末尾，往下滚即可看到。
-      scrollToElement(userMessage);
-    } catch (err) {
-      clearInterval(pending._timer);
-      if (controller.signal.aborted) {
-        pending.replaceWith(createNoticeMessage("已停止生成。"));
-      } else {
-        pending.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
-      }
-      scrollToElement(userMessage);
-    } finally {
-      if (solveAbort === controller) solveAbort = null;
-      if (solveRequestId === requestId) solveRequestId = "";
-      setBusy(false);
-      input.focus();
-    }
+    // 深度检查默认开启：每次新提问都走 Planner → Solver → Verifier。
+    await submitMultiQuestion(question);
   }
 
   form.addEventListener("submit", (event) => {

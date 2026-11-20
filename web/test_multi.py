@@ -36,3 +36,6 @@ def test_multi_stream_with_stub(monkeypatch, tmp_path):
     final = next(event for event in events if event.get("type") == "final")
     assert final["answer"]
     assert "display_answer" in final
+    # 最终回答写入会话，步骤追问依赖这两个字段
+    assert final["session_id"]
+    assert final["turn_id"]

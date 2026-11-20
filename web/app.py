@@ -278,13 +278,24 @@ class CancelRequest(BaseModel):
 
 
 class MultiAskRequest(BaseModel):
-    """多 Agent 深度检查请求（单题，不写会话）。"""
+    """多 Agent 深度检查请求。"""
 
     question: str = Field(
         ...,
         min_length=1,
         max_length=MAX_QUESTION_CHARS,
         description="用户输入的题目文本",
+    )
+    session_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description="已有会话 id；首次提问不传",
+    )
+    request_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="客户端生成的一次性请求 id",
     )
 
 
@@ -1314,7 +1325,8 @@ def ask(req: AskRequest) -> AskResponse:
 def ask_multi(req: MultiAskRequest):
     """Planner → Solver → Verifier 深度检查，SSE 推送阶段进度。
 
-    这是单题模式，不写会话；普通解题仍走 /api/ask。
+    首次提问会创建会话，最终回答写入会话，这样回答下方的“问这一步”
+    仍能复用原有的步骤追问接口。
     """
     question = req.question.strip()
     if not question:
@@ -1327,11 +1339,39 @@ def ask_multi(req: MultiAskRequest):
     if not _slots.acquire(timeout=0.5):
         raise HTTPException(status_code=429, detail="当前有题目正在求解，请稍后再试。")
 
+    request_key = req.request_id or uuid.uuid4().hex
+    session: Session | None = None
+    try:
+        session = SESSIONS.get_or_create(req.session_id)
+        if not session.lock.acquire(timeout=0.5):
+            raise HTTPException(
+                status_code=409,
+                detail="该会话正在处理上一条消息，请稍后再试。",
+            )
+        try:
+            if not SESSIONS.begin_request(session, request_key):
+                raise HTTPException(
+                    status_code=409,
+                    detail="该会话正在处理上一条消息，请稍后再试。",
+                )
+            history = SESSIONS.history_for(session)
+            follow_up = bool(history)
+            turn = len(session.turns) + 1
+        finally:
+            session.lock.release()
+    except Exception:
+        if session is not None:
+            with session.lock:
+                SESSIONS.end_request(session, request_key)
+        _slots.release()
+        raise
+
     client = get_client()
     retrieval = index_available()
     trace_path = new_trace_file(TRACE_DIR, prefix="multi")
     tracer = TraceRecorder(case_id="multi", question=question, path=trace_path)
     events: queue.Queue = queue.Queue()
+    final_event: dict = {}
 
     def emit(event: dict) -> None:
         if event.get("type") == "final":
@@ -1345,7 +1385,10 @@ def ask_multi(req: MultiAskRequest):
             solution = parse_solution(display)
             event["solution"] = solution.model_dump() if solution else None
             event["trace_file"] = trace_path.name
-        events.put(event)
+            final_event.clear()
+            final_event.update(event)
+        else:
+            events.put(event)
 
     orchestrator = Orchestrator(
         Planner(client),
@@ -1360,12 +1403,28 @@ def ask_multi(req: MultiAskRequest):
         result = None
         try:
             result = orchestrator.run(question)
+            turn_id = None
+            with session.lock:
+                still_owner = SESSIONS.end_request(session, request_key)
+                if still_owner and result.answer and not result.answer.startswith("错误："):
+                    turn_id = SESSIONS.append_turn(session, question, result.answer)
+            final_event.update({
+                "session_id": session.id,
+                "turn_id": turn_id,
+                "turn": turn,
+                "follow_up": follow_up,
+            })
+            events.put(final_event)
             tracer.finish(
                 request_elapsed=round(result.elapsed, 4),
                 mode="multi",
+                session_id=session.id,
+                turn=turn,
                 verdict=result.review.verdict.value if result.review else "",
             )
         except Exception as exc:
+            with session.lock:
+                SESSIONS.end_request(session, request_key)
             events.put({
                 "type": "error",
                 "message": f"多 Agent 求解失败（{type(exc).__name__}: {exc}）",

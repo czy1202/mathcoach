@@ -174,9 +174,9 @@ SIMPLETEX_TOKEN=用户自己的令牌
 页面能力：
 
 - 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
-- 输入框上方可开启「深度检查」：Planner → Solver → Verifier 多 Agent，
+- 默认开启「深度检查」：Planner → Solver → Verifier 多 Agent，
   页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、复核结论和耗时；
-  默认关闭，开启后 token 和延迟会增加
+  多 Agent 的 token 和延迟会比单 Agent 高
 - 解题模式：Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
 - 解题模式：回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
 - 求解等待期间显示「停止」按钮：浏览器立即恢复输入，同时通知服务端在
@@ -227,9 +227,10 @@ SIMPLETEX_TOKEN=用户自己的令牌
   响应会返回服务端生成的 id，后续追问带同一个 id。如果模型调用了
   `list_past_problems`，响应会额外带上完整试卷 `paper`；完整解答还会返回
   `turn_id`（稳定定位本轮回答）和 `solution`（`intro` / `steps` / `outro`）
-- `POST /api/ask-multi`：请求体 `{question}`，返回 `text/event-stream`。
-  依次推送 `stage` 事件（planner / solver / verifier / revision）和 `final` 事件；
-  单题模式，不写会话，适合页面上的“深度检查”开关
+- `POST /api/ask-multi`：请求体 `{question, session_id?, request_id?}`，
+  返回 `text/event-stream`。依次推送 `stage` 事件（planner / solver /
+  verifier / revision）和 `final` 事件；最终回答会写入会话并返回
+  `turn_id` / `solution`，因此回答下方的“问这一步”仍可用
 - `POST /api/ask-step`：针对某一轮回答中的某一步追问。请求体为
   `{question, parent_session_id, parent_turn_id?, parent_turn?, step_index,
   step_text?, step_session_id?}`；响应只包含这一步的短回答和独立的
@@ -721,9 +722,10 @@ mathcoach/
   结果必须人工核对。也可以切到本机 Ollama（免费但需安装约 2.7 GB 模型）或
   SimpleTex（云端数学 OCR，按额度计费）。DeepSeek / 本地路线只支持 PNG / JPG，
   单张上限 10 MB；整页识别暂不自动切分题目。
-- 多 Agent 深度检查默认关闭，且目前是单题模式：不写会话、不支持步骤追问。
+- 多 Agent 深度检查默认开启；最终回答会写入会话，步骤追问可用。
   Planner / Verifier 与 Solver 使用同一模型，仍可能存在共同盲区；34 题上的
   多配置消融还要继续跑，当前不能把“多 Agent 一定更好”当成结论。
+  单 Agent 的 `/api/ask` 仍保留，供 API 调用和对照实验使用。
 - `sympy.parse_expr` 最终仍会执行字符串表达式。现在已限制到数学函数/常量的
   命名空间，并拒绝属性访问、分号、引号等非数学语法；这能挡住常见注入，
   但不是独立沙箱。接入不可信公网输入前，仍应放到进程/容器级隔离中解析。
