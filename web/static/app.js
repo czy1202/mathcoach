@@ -661,15 +661,32 @@
     if (!box) return;
     const body = box.querySelector(".agent-stream-body");
     box.hidden = false;
+
+    // 重解是一份全新的解答，继续追加会和初稿混在一起，直接从头显示。
+    if (box._stage && box._stage !== event.stage) {
+      box._text = "";
+    }
+    if (box._stage !== event.stage) {
+      box._stage = event.stage;
+      const head = box.querySelector(".agent-stream-head");
+      if (head) {
+        head.textContent = event.stage === "revision"
+          ? "正在按复核意见重解…"
+          : "正在书写解答…";
+      }
+    }
+
     box._text = (box._text || "") + (event.text || "");
     if (article._streamTimer) return;
 
     article._streamTimer = setTimeout(() => {
       article._streamTimer = null;
       if (!body.isConnected) return;
+      // 用户手动往上翻时不要强行拉回底部。
+      const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 48;
       body.innerHTML = renderMarkdown(box._text)
         + '<span class="stream-cursor" aria-hidden="true"></span>';
-      body.scrollTop = body.scrollHeight;
+      if (pinned) body.scrollTop = body.scrollHeight;
     }, 120);
   }
 
@@ -717,10 +734,30 @@
       current.dataset.label = `${labels[stage] || stage} · ${statusText}`;
     }
     if (detail && event.detail) detail.textContent = event.detail;
+
+    // 预览区的标题跟着阶段走，避免 Solver 已经写完还显示“正在书写”。
+    const streamBox = article.querySelector(".agent-stream");
+    if (streamBox && !streamBox.hidden && event.status === "done") {
+      const head = streamBox.querySelector(".agent-stream-head");
+      if (head) {
+        head.textContent = stage === "revision"
+          ? "重解完成，正在独立复核…"
+          : stage === "solver"
+            ? "解答已完成，正在独立复核…"
+            : head.textContent;
+      }
+    }
   }
 
   function isProofQuestion(text) {
     return /证明|求证|试证/.test(String(text || ""));
+  }
+
+  // 证明题的结论是“得证/原命题成立”，用“最终答案”卡片显示没有意义。
+  function applyAnswerCardPolicy(message, question) {
+    if (!message || !isProofQuestion(question)) return;
+    const card = message.querySelector(".answer-card");
+    if (card) card.hidden = true;
   }
 
   function addFastActions(message, question, data) {
@@ -842,6 +879,7 @@
               }
               input.placeholder = "继续追问这道题，例如：这一步为什么？";
               const message = createAssistantMessage(data);
+              applyAnswerCardPolicy(message, question);
               const meta = message.querySelector(".meta");
               if (meta) {
                 meta.textContent =
@@ -923,6 +961,7 @@
       paintTimer = null;
       lastPaint = performance.now();
       if (!shell) return;
+      shell._streamText = text;
       const content = shell.querySelector(".content");
       content.innerHTML = renderMarkdown(text)
         + '<span class="stream-cursor" aria-hidden="true"></span>';
@@ -1047,6 +1086,7 @@
         return;
       }
       const message = createAssistantMessage(data);
+      applyAnswerCardPolicy(message, question);
       if (mode === "fast") addFastActions(message, question, data);
       holder.replaceWith(message);
       scrollToElement(userMessage);
@@ -1355,6 +1395,30 @@
       <div class="avatar">∑</div>
       <div class="bubble"><div class="notice-box"></div></div>`;
     article.querySelector(".notice-box").textContent = message;
+    return article;
+  }
+
+  // 停止生成时保留已经写出来的部分，而不是把内容整个丢掉。
+  function createStoppedMessage(node) {
+    const streamBox = node && node.querySelector
+      ? node.querySelector(".agent-stream")
+      : null;
+    const text = (streamBox && streamBox._text)
+      || (node && node._streamText)
+      || "";
+    if (!text.trim()) return createNoticeMessage("已停止生成。");
+
+    const article = document.createElement("article");
+    article.className = "message assistant";
+    article.innerHTML = `
+      <div class="avatar">∑</div>
+      <div class="bubble">
+        <div class="content"></div>
+        <div class="notice-box"></div>
+      </div>`;
+    article.querySelector(".content").innerHTML = renderMarkdown(text);
+    article.querySelector(".notice-box").textContent =
+      "已停止生成，以上内容不完整，仅供参考。";
     return article;
   }
 
@@ -2017,7 +2081,7 @@
     if (node) {
       clearInterval(node._timer);
       clearAgentStream(node);
-      node.replaceWith(createNoticeMessage("已停止生成。"));
+      node.replaceWith(createStoppedMessage(node));
     }
     setBusy(false);
   }
@@ -2089,7 +2153,7 @@
 
       turns.forEach((turn) => {
         appendUser(turn.question || "");
-        chat.appendChild(createAssistantMessage({
+        const message = createAssistantMessage({
           answer: turn.answer || "",
           display_answer: turn.display_answer || turn.answer || "",
           session_id: sessionId,
@@ -2100,7 +2164,9 @@
           final_answer_display: turn.final_answer_display || null,
           solution: turn.solution || null,
           restored: true,
-        }));
+        });
+        applyAnswerCardPolicy(message, turn.question || "");
+        chat.appendChild(message);
       });
 
       input.placeholder = "继续追问这道题，例如：这一步为什么？";
