@@ -2245,7 +2245,7 @@
   },
   "cmc-14-prelim-x-09": {
     "hash": "de840e1fadee917381b5e86dc1d04e3ceb477ce1",
-    "latex": "设 $z = f(x, y)$ 是区域 $D = \\{(x, y) \\mid 0 \\le x \\le 1, 0 \\le y \\le 1\\}$ 上的可微函数, $f(0, 0) = 0$, 且 $dz(0, 0) = 3dx + 2dy$, 求极限\n$$\\lim_{x \\to 0^+} \\frac{\\int_0^{x^2} dt \\int_{\\sqrt{t}}^{x} f(t, u) du}{1 - \\sqrt[4]{1 - x^4}}$$",
+    "latex": "设 $z = f(x, y)$ 是区域 $D = \\{(x, y) \\mid 0 \\le x \\le 1, 0 \\le y \\le 1\\}$ 上的可微函数, $f(0, 0) = 0$, 且 $dz(0, 0) = 3dx + 2dy$, 求极限\n$$\\lim_{x \\to 0^+} \\frac{\\int_0^{x^2} dt \\int_{x}^{\\sqrt{t}} f(t, u) du}{1 - \\sqrt[4]{1 - x^4}}$$",
     "model": "deepseek-chat",
     "generated_at": "2026-10-31T05:31:30+00:00"
   },
