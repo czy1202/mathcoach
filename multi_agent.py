@@ -156,6 +156,10 @@ class Planner:
             return default_plan()
 
 
+class SolverError(RuntimeError):
+    """Solver 没有产出有效解答（超时、取消、模型错误）。"""
+
+
 class Solver:
     """复用现有 Agent 循环执行计划。
 
@@ -169,7 +173,7 @@ class Solver:
         *,
         retrieval: bool = False,
         max_steps: int = 15,
-        step_timeout: float = 60.0,
+        step_timeout: float = 120.0,
     ) -> None:
         self.retrieval = retrieval
         self.agent_plain = Agent(
@@ -196,13 +200,20 @@ class Solver:
             return self.agent_retrieval
         return self.agent_plain
 
+    @staticmethod
+    def _valid_answer(answer: str) -> str:
+        if not answer or answer.startswith("错误：") or answer == "已停止生成。":
+            raise SolverError(answer or "模型没有返回解答。")
+        return answer
+
     def solve(self, question: str, plan: Plan) -> Draft:
         prompt = (
             f"题目：\n{question}\n\n"
             f"Planner 给出的计划：\n{_plan_text(plan)}\n\n"
             "请按计划完整求解。"
         )
-        return _draft_from_answer(self._agent_for(plan).run(prompt))
+        answer = self._valid_answer(self._agent_for(plan).run(prompt))
+        return _draft_from_answer(answer)
 
     def revise(self, question: str, plan: Plan, draft: Draft, review: Review) -> Draft:
         issues = "\n".join(
@@ -217,7 +228,8 @@ class Solver:
             f"建议修正：{review.suggested_fix or '无'}\n\n"
             "请只针对以上问题修正，未涉及的部分保持不动，重新输出完整解答。"
         )
-        return _draft_from_answer(self._agent_for(plan).run(prompt))
+        answer = self._valid_answer(self._agent_for(plan).run(prompt))
+        return _draft_from_answer(answer)
 
 
 class Verifier:
@@ -266,7 +278,7 @@ class MultiAgentResult:
     stages: list[dict] = field(default_factory=list)
 
     def to_event(self) -> dict:
-        return {
+        event = {
             "type": "final",
             "answer": self.answer,
             "final_answer": (self.draft.final_answer if self.draft else ""),
@@ -276,6 +288,9 @@ class MultiAgentResult:
             "warning": self.warning,
             "elapsed": round(self.elapsed, 3),
         }
+        if self.warning == "solver_error" or self.answer.startswith("错误："):
+            event["error"] = self.answer
+        return event
 
 
 class Orchestrator:

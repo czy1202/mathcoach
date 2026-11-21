@@ -76,7 +76,7 @@ class Budget(BaseModel):
     max_solver_steps: int = 15
     max_verifier_steps: int = 20
     max_revisions: int = 1
-    max_seconds: float = 180.0
+    max_seconds: float = 300.0
     max_llm_calls: int = 12
 
 

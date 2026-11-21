@@ -795,6 +795,11 @@
             if (event.type === "final") {
               clearInterval(progress._timer);
               finished = true;
+              if (event.error) {
+                progress.replaceWith(createErrorMessage(event.error));
+                scrollToBottom();
+                continue;
+              }
               const data = { ...event };
               if (data.session_id) {
                 sessionId = data.session_id;
