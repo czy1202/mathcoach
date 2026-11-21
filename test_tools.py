@@ -155,3 +155,22 @@ def test_verify_still_supports_integrate():
         "integrate(x, (x, 0, 1))",
         "1/2",
     ) is True
+
+
+def test_run_tool_timeout_returns_error_text(monkeypatch):
+    """工具执行超时不能拖死整个请求，应返回可读的错误文本。"""
+    import time
+
+    import tools
+
+    monkeypatch.setitem(
+        tools.ALL_TOOLS,
+        "slow_test_tool",
+        {"函数": lambda: time.sleep(0.5), "描述": "", "参数说明": {}},
+    )
+
+    result = tools.run_tool("slow_test_tool", {}, timeout=0.1)
+
+    assert isinstance(result, str)
+    assert "超时" in result
+    assert "slow_test_tool" in result

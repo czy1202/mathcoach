@@ -13,6 +13,7 @@ import os
 import random
 import re
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -760,17 +761,34 @@ RETRIEVAL_TOOLS: dict[str, dict] = {
 ALL_TOOLS: dict[str, dict] = {**TOOLS, **RETRIEVAL_TOOLS}
 
 
-def run_tool(name: str, args: dict) -> Any:
-    """按名字调用工具。
+TOOL_TIMEOUT = 10.0
+
+
+def run_tool(
+    name: str,
+    args: dict,
+    timeout: float = TOOL_TIMEOUT,
+    cancel_event: threading.Event | None = None,
+) -> Any:
+    """按名字调用工具，并给执行加超时护栏。
+
+    sympy 对某些复杂表达式会算很久（例如符号积分/化简），不设上限会让
+    整个请求卡死，用户点“停止”也没有用。这里把工具放到守护线程里跑，
+    主线程最多等 timeout 秒；超时返回错误文本，模型会看到并换方法。
+
+    注意：Python 线程无法强行终止，超时的计算仍会在后台跑完；因此
+    同一道题里超时后不应反复重试同一个工具调用。
 
     Args:
         name: 工具名，必须是 ALL_TOOLS 中的键
         args: 参数字典，会以关键字参数形式传给工具函数
+        timeout: 单次工具执行的超时秒数
+        cancel_event: 可选的取消信号，置位后立即返回“已停止生成。”
 
     Returns:
-        成功时返回工具函数的原始返回值；工具不存在或参数不对时，
-        返回一段错误说明字符串。本函数不抛异常，错误一律以文本返回，
-        便于上层把错误信息交回模型自行纠正。
+        成功时返回工具函数的原始返回值；工具不存在、参数不对、超时或
+        取消时返回一段说明字符串。本函数不抛异常，便于上层把错误信息
+        交回模型自行纠正。
     """
     tool = ALL_TOOLS.get(name)
     if tool is None:
@@ -780,9 +798,29 @@ def run_tool(name: str, args: dict) -> Any:
     if not isinstance(args, dict):
         return f"错误：args 必须是字典，收到的是 {type(args).__name__}"
 
-    try:
-        return tool["函数"](**args)
-    except TypeError as e:
-        return f"错误：参数不匹配（{e}）"
-    except Exception as e:
-        return f"错误：工具执行失败（{type(e).__name__}: {e}）"
+    done = threading.Event()
+    outcome: dict[str, Any] = {}
+
+    def invoke() -> None:
+        try:
+            outcome["value"] = tool["函数"](**args)
+        except TypeError as e:
+            outcome["value"] = f"错误：参数不匹配（{e}）"
+        except Exception as e:
+            outcome["value"] = f"错误：工具执行失败（{type(e).__name__}: {e}）"
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=invoke, daemon=True)
+    worker.start()
+
+    deadline = time.monotonic() + timeout
+    while not done.wait(0.2):
+        if cancel_event is not None and cancel_event.is_set():
+            return "已停止生成。"
+        if time.monotonic() > deadline:
+            return (
+                f"错误：工具 {name} 执行超时（超过 {timeout:g} 秒）已中止，"
+                "请换一种更简单的验证方式，或直接给出结论并注明“未工具验证”。"
+            )
+    return outcome.get("value")

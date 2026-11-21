@@ -85,6 +85,9 @@
   let sessionId = null;
   let solveAbort = null;
   let solveRequestId = "";
+  // 当前正在显示的“思考中/流式”占位元素。停止时直接替换它，
+  // 不依赖 fetch 的 abort 一定及时 reject，保证界面一定能恢复。
+  let activeSolveNode = null;
 
   let mode = null; // null = 模式选择页
   let papersState = "idle"; // idle | loading | ready | error
@@ -748,6 +751,7 @@
     } else {
       chat.appendChild(progress);
     }
+    activeSolveNode = progress;
     scrollToBottom();
 
     let finished = false;
@@ -851,6 +855,7 @@
     } finally {
       if (solveAbort === controller) solveAbort = null;
       if (solveRequestId === requestId) solveRequestId = "";
+      if (activeSolveNode === progress) activeSolveNode = null;
       setBusy(false);
       input.focus();
     }
@@ -959,6 +964,7 @@
 
     const pending = createPending();
     chat.appendChild(pending);
+    activeSolveNode = pending;
     // 流式开始时 pending 会被替换成真正的消息气泡，后续错误也要替换它。
     let holder = pending;
     scrollToBottom();
@@ -988,6 +994,7 @@
       if (streaming) {
         data = await consumeAskStream(response, pending, (shell) => {
           holder = shell;
+          activeSolveNode = shell;
         });
       } else {
         data = await response.json().catch(() => ({}));
@@ -1018,6 +1025,7 @@
     } finally {
       if (solveAbort === controller) solveAbort = null;
       if (solveRequestId === requestId) solveRequestId = "";
+      if (activeSolveNode === holder) activeSolveNode = null;
       setBusy(false);
       input.focus();
     }
@@ -1966,6 +1974,15 @@
     const requestId = solveRequestId;
     if (solveAbort) solveAbort.abort();
     requestCancel(requestId);
+    // 不依赖 fetch 的 abort 回调：立即替换占位元素并恢复输入，
+    // 即使服务端卡在工具计算里，界面也不会一直停在“求解中”。
+    const node = activeSolveNode;
+    activeSolveNode = null;
+    if (node) {
+      clearInterval(node._timer);
+      node.replaceWith(createNoticeMessage("已停止生成。"));
+    }
+    setBusy(false);
   }
 
   function startNewChat() {
