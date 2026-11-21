@@ -26,6 +26,10 @@ STEP_TIMEOUT = 30.0     # 单轮模型调用的超时时间（秒）
 
 CANCELLED_MESSAGE = "已停止生成。"
 
+
+class StreamInterrupted(RuntimeError):
+    """流式输出中途失败；此时通常已经向用户显示了一部分内容。"""
+
 SYSTEM_PROMPT = r"""你是一名数学竞赛解题助手，请按下面的规则回答：
 
 1. 计算题优先调用工具验证关键步骤，不得自行心算后直接下结论。
@@ -183,6 +187,7 @@ class Agent:
         trace=None,
         history: list[dict] | None = None,
         cancel_event: threading.Event | None = None,
+        on_token=None,
     ) -> str:
         """求解一道题，或基于历史回答一次追问。
 
@@ -196,6 +201,8 @@ class Agent:
                           Agent 会在每次模型调用/工具调用之间检查，避免
                          继续消耗后续步骤。已经发出的单次请求无法中途
                          打断，但最多只多等这一次调用。
+            on_token: 可选的流式回调，每收到一段模型文本就调用一次。
+                      客户端没有 chat_stream 时自动退回非流式调用。
 
         Returns:
             str: 模型的最终文字答案；触发护栏时返回明确的错误提示。
@@ -231,8 +238,17 @@ class Agent:
             # 连续两次超时才判定该题失败，避免白白丢掉一道能做对的题。
             for attempt in (1, 2):
                 try:
-                    resp = self._chat_with_timeout(messages)
+                    resp = self._call_model(messages, on_token)
                     break
+                except StreamInterrupted as exc:
+                    # 已经向用户输出了一部分内容，重试会造成重复文本；
+                    # 直接结束，并明确告诉用户这次输出不完整。
+                    message = f"错误：第 {step} 步流式输出中断（{exc}），本次回答不完整。"
+                    self._emit(
+                        trace, "error", step=step, kind="stream_interrupted",
+                        message=message,
+                    )
+                    return message
                 except FutureTimeoutError:
                     if attempt == 2:
                         message = (
@@ -386,6 +402,50 @@ class Agent:
         if hasattr(usage, "as_dict"):
             return usage.as_dict()
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+    def _call_model(self, messages: list[dict], on_token=None) -> LLMResponse:
+        """有流式回调且客户端支持时走流式，否则保持原来的阻塞调用。"""
+        if on_token is None or not hasattr(self.client, "chat_stream"):
+            return self._chat_with_timeout(messages)
+        return self._stream_with_timeout(messages, on_token)
+
+    def _stream_with_timeout(
+        self,
+        messages: list[dict],
+        on_token,
+    ) -> LLMResponse:
+        """消费流式响应，同时保留单步超时护栏。
+
+        超时判断在每收到一段内容时进行；网络本身由客户端自己的
+        timeout 参数兜底。已经输出过内容后再超时不能重试，否则前端
+        会看到重复文本，因此抛 StreamInterrupted。
+        """
+        deadline = time.perf_counter() + self.step_timeout
+        response: LLMResponse | None = None
+        emitted = False
+        stream = self.client.chat_stream(
+            messages, self.tools_schema, timeout=self.step_timeout
+        )
+        try:
+            for event in stream:
+                if time.perf_counter() > deadline:
+                    if emitted:
+                        raise StreamInterrupted("超过单步时限")
+                    raise FutureTimeoutError()
+                if event.get("type") == "delta":
+                    text = event.get("text") or ""
+                    if text:
+                        emitted = True
+                        on_token(text)
+                elif event.get("type") == "done":
+                    response = event.get("response")
+        finally:
+            close = getattr(stream, "close", None)
+            if close is not None:
+                close()
+        if response is None:
+            raise StreamInterrupted("连接结束但没有收到完整响应")
+        return response
 
     def _chat_with_timeout(self, messages: list[dict]) -> LLMResponse:
         """带超时地调用一次模型。

@@ -175,7 +175,8 @@ SIMPLETEX_TOKEN=用户自己的令牌
 
 - 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
 - 默认先返回「快速答案」：单 Agent + 工具验证，不检索真题，适合填空、
-  选择和简单计算；答案下方显示“已工具验证 / 未独立复核”
+  选择和简单计算；答案下方显示“已工具验证 / 未独立复核”。快速模式走
+  SSE 流式输出，模型生成到哪就显示到哪，不必等整段回答结束
 - 快速答案下方提供「查看详细过程」：点击后运行 Planner → Solver →
   Verifier 多 Agent，页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、
   复核结论和耗时，详细结果追加在快速答案下方
@@ -233,6 +234,10 @@ SIMPLETEX_TOKEN=用户自己的令牌
   默认 `standard` 保留完整讲解。首次提问不传 `session_id`，后续追问带同一个 id。
   如果模型调用了 `list_past_problems`，响应会额外带上完整试卷 `paper`；
   完整解答还会返回 `turn_id` 和 `solution`（`intro` / `steps` / `outro`）
+- `POST /api/ask-stream`：与 `/api/ask` 参数相同，返回 `text/event-stream`。
+  正文按段推送 `{type:"delta", text}`，结束时推送一个带完整
+  `AskResponse` 字段的 `{type:"done"}`；快速模式前端使用这个接口。
+  客户端不支持流式时会自动退回普通调用，不影响结果
 - `POST /api/ask-multi`：请求体 `{question, session_id?, request_id?}`，
   返回 `text/event-stream`。依次推送 `stage` 事件（planner / solver /
   verifier / revision）和 `final` 事件；最终回答会写入会话并返回

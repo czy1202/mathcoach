@@ -265,3 +265,26 @@ def test_cancel_during_model_call_skips_tools_and_next_step():
 
     assert answer == CANCELLED_MESSAGE
     assert client.calls == 1
+
+
+def test_stream_callback_receives_answer_chunks():
+    """on_token 应按顺序收到全部正文，拼接后等于最终答案。"""
+    from llm import StubClient
+
+    chunks: list[str] = []
+    answer = Agent(client=StubClient()).run("测试题", on_token=chunks.append)
+
+    assert answer == "验证通过：两边等价。\n最终答案：1"
+    assert "".join(chunks) == answer
+    assert len(chunks) > 1
+
+
+def test_stream_callback_falls_back_without_chat_stream():
+    """客户端没有 chat_stream 时，带回调也必须退回普通调用而不是报错。"""
+    client = RecordingClient()
+    chunks: list[str] = []
+
+    answer = Agent(client=client).run("测试题", on_token=chunks.append)
+
+    assert answer == "最终答案：1/2"
+    assert chunks == []

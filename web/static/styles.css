@@ -827,6 +827,25 @@ textarea {
   animation: spin 0.75s linear infinite;
 }
 
+/* 流式输出时跟在正文后面的光标 */
+.stream-cursor {
+  display: inline-block;
+  width: 0.45em;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: currentColor;
+  opacity: 0.45;
+  border-radius: 1px;
+  animation: stream-blink 1s steps(2, start) infinite;
+}
+
+@keyframes stream-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
 .error-box {
   padding: 11px 14px;
   border: 1px solid var(--red-line);

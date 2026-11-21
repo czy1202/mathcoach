@@ -856,6 +856,93 @@
     }
   }
 
+  function createStreamingMessage() {
+    const article = document.createElement("article");
+    article.className = "message assistant";
+    article.innerHTML = `
+      <div class="avatar">∑</div>
+      <div class="bubble">
+        <div class="content streaming"></div>
+      </div>`;
+    return article;
+  }
+
+  // 解析 /api/ask-stream 的 SSE：逐步回调正文，最后返回 done 事件。
+  async function consumeAskStream(response, pending, onShell) {
+    if (!response.body) throw new Error("浏览器不支持流式响应。");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let text = "";
+    let shell = null;
+    let lastPaint = 0;
+    let paintTimer = null;
+
+    const paint = () => {
+      paintTimer = null;
+      lastPaint = performance.now();
+      if (!shell) return;
+      const content = shell.querySelector(".content");
+      content.innerHTML = renderMarkdown(text)
+        + '<span class="stream-cursor" aria-hidden="true"></span>';
+      scrollToBottom();
+    };
+    const schedule = () => {
+      if (paintTimer !== null) return;
+      const wait = Math.max(0, 90 - (performance.now() - lastPaint));
+      paintTimer = setTimeout(paint, wait);
+    };
+    const stopPaint = () => {
+      if (paintTimer !== null) {
+        clearTimeout(paintTimer);
+        paintTimer = null;
+      }
+    };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let split;
+        while ((split = buffer.indexOf("\n\n")) >= 0) {
+          const chunk = buffer.slice(0, split);
+          buffer = buffer.slice(split + 2);
+          for (const line of chunk.split("\n")) {
+            if (!line.startsWith("data:")) continue;
+            let event;
+            try {
+              event = JSON.parse(line.slice(5).trim());
+            } catch (_) {
+              continue;
+            }
+
+            if (event.type === "delta") {
+              clearInterval(pending._timer);
+              if (!shell) {
+                shell = createStreamingMessage();
+                pending.replaceWith(shell);
+                onShell(shell);
+              }
+              text += event.text || "";
+              schedule();
+            } else if (event.type === "error") {
+              throw new Error(event.message || "流式求解失败。");
+            } else if (event.type === "done") {
+              stopPaint();
+              return event;
+            }
+          }
+        }
+      }
+      throw new Error("连接结束，但没有收到最终答案。");
+    } catch (err) {
+      stopPaint();
+      throw err;
+    }
+  }
+
   async function submitSingleQuestion(question, mode = "standard") {
     const requestId = newRequestId();
     const controller = new AbortController();
@@ -872,38 +959,60 @@
 
     const pending = createPending();
     chat.appendChild(pending);
+    // 流式开始时 pending 会被替换成真正的消息气泡，后续错误也要替换它。
+    let holder = pending;
     scrollToBottom();
 
     try {
-      const response = await fetch("/api/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          question,
-          session_id: sessionId,
-          request_id: requestId,
-          ...(mode === "fast" ? { mode: "fast" } : {}),
-        }),
-      });
-      const data = await response.json().catch(() => ({}));
+      const streaming = mode === "fast";
+      const response = await fetch(
+        streaming ? "/api/ask-stream" : "/api/ask",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            question,
+            session_id: sessionId,
+            request_id: requestId,
+            ...(streaming ? { mode: "fast" } : {}),
+          }),
+        },
+      );
       if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
         throw new Error(errorText(data.detail, response.status));
       }
+
+      let data;
+      if (streaming) {
+        data = await consumeAskStream(response, pending, (shell) => {
+          holder = shell;
+        });
+      } else {
+        data = await response.json().catch(() => ({}));
+      }
+
       sessionId = data.session_id || sessionId;
       rememberSession(sessionId);
       input.placeholder = "继续追问这道题，例如：这一步为什么？";
       clearInterval(pending._timer);
+      // 流式期间已经显示了一半，超时/失败时不要再把错误文本当正文。
+      if (streaming && data.error) {
+        holder.replaceWith(createErrorMessage(data.error));
+        scrollToElement(userMessage);
+        return;
+      }
       const message = createAssistantMessage(data);
       if (mode === "fast") addFastActions(message, question, data);
-      pending.replaceWith(message);
+      holder.replaceWith(message);
       scrollToElement(userMessage);
     } catch (err) {
       clearInterval(pending._timer);
       if (controller.signal.aborted) {
-        pending.replaceWith(createNoticeMessage("已停止生成。"));
+        holder.replaceWith(createNoticeMessage("已停止生成。"));
       } else {
-        pending.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
+        holder.replaceWith(createErrorMessage(err.message || "网络请求失败。"));
       }
       scrollToElement(userMessage);
     } finally {

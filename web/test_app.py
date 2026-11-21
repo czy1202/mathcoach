@@ -959,3 +959,39 @@ def test_cancel_releases_session_for_immediate_followup(monkeypatch, tmp_path):
     assert [turn["question"] for turn in session.turns] == ["原题", "新问题"]
     assert result["data"].error == "已停止生成。"
     assert result["data"].turn_id is None
+
+
+def test_ask_stream_emits_deltas_and_done(monkeypatch, tmp_path):
+    """流式接口应先逐段推送正文，最后发送带完整字段的 done 事件。"""
+
+    class StreamClient:
+        def chat(self, messages, tools=None):
+            return LLMResponse(content="极限为 3。\n最终答案：3")
+
+        def chat_stream(self, messages, tools=None, timeout=None):
+            yield {"type": "delta", "text": "极限为 "}
+            yield {"type": "delta", "text": "3。\n最终答案：3"}
+            yield {"type": "done", "response": self.chat(messages, tools)}
+
+    monkeypatch.setattr(web_app, "_fast_client", StreamClient())
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post(
+        "/api/ask-stream",
+        json={"question": "计算极限", "mode": "fast"},
+    )
+
+    assert response.status_code == 200
+    events = [
+        json.loads(line[5:])
+        for line in response.text.split("\n")
+        if line.startswith("data:")
+    ]
+    deltas = "".join(e["text"] for e in events if e["type"] == "delta")
+    done = next(e for e in events if e["type"] == "done")
+
+    assert deltas.startswith("极限为")
+    assert done["type"] == "done"
+    assert done["final_answer"] == "3"
+    assert done["session_id"]
+    assert done["turn_id"]

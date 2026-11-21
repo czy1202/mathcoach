@@ -100,6 +100,16 @@ TOOLS_SCHEMA: list[dict] = build_tools_schema(TOOLS)
 RETRIEVAL_TOOL_SCHEMA: list[dict] = build_tools_schema(RETRIEVAL_TOOLS)
 
 
+def _usage_from(resp: Any) -> Usage:
+    """从响应（或流式 chunk）里取 usage，兼容没有该字段的客户端。"""
+    raw = getattr(resp, "usage", None)
+    return Usage(
+        prompt_tokens=getattr(raw, "prompt_tokens", 0) or 0,
+        completion_tokens=getattr(raw, "completion_tokens", 0) or 0,
+        total_tokens=getattr(raw, "total_tokens", 0) or 0,
+    )
+
+
 # ---------- 真实模型客户端 ----------
 
 class OpenAIClient:
@@ -128,6 +138,21 @@ class OpenAIClient:
             base_url=base_url or config.OPENAI_BASE_URL or None,
         )
 
+    def _request_kwargs(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+    ) -> dict[str, Any]:
+        """把 temperature / reasoning / tools 等组装成请求参数。"""
+        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        if tools:
+            kwargs["tools"] = tools
+        return kwargs
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -142,14 +167,7 @@ class OpenAIClient:
         Returns:
             LLMResponse: content 与 tool_calls 的统一定义
         """
-        kwargs: dict[str, Any] = {"model": self.model, "messages": messages}
-        if self.temperature is not None:
-            kwargs["temperature"] = self.temperature
-        if self.reasoning_effort:
-            kwargs["reasoning_effort"] = self.reasoning_effort
-        if tools:
-            kwargs["tools"] = tools
-
+        kwargs = self._request_kwargs(messages, tools)
         resp = self._client.chat.completions.create(**kwargs)
         message = resp.choices[0].message
 
@@ -167,18 +185,93 @@ class OpenAIClient:
                 id=call.id or "",
             ))
 
-        raw_usage = getattr(resp, "usage", None)
-        usage = Usage(
-            prompt_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
-            total_tokens=getattr(raw_usage, "total_tokens", 0) or 0,
-        )
-
         return LLMResponse(
             content=message.content or "",
             tool_calls=tool_calls,
-            usage=usage,
+            usage=_usage_from(resp),
         )
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        timeout: float | None = None,
+    ):
+        """流式调用：先逐段 yield 文本，最后 yield 完整响应。
+
+        生成器产出两种事件：
+        - ``{"type": "delta", "text": "..."}``：模型刚生成的片段；
+        - ``{"type": "done", "response": LLMResponse}``：拼装完成的响应。
+
+        工具调用参数会分多条到达，按 index 聚合后再统一解析，
+        与 chat() 返回的 LLMResponse 结构完全一致。
+        """
+        kwargs = self._request_kwargs(messages, tools)
+        kwargs["stream"] = True
+        # 让服务端在最后一条 chunk 里带上 usage；部分兼容端点不支持这个参数，
+        # 报错时退回不带 usage 的普通流式请求（只影响统计，不影响回答）。
+        kwargs["stream_options"] = {"include_usage": True}
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        try:
+            stream = self._client.chat.completions.create(**kwargs)
+        except Exception:
+            if "stream_options" not in kwargs:
+                raise
+            kwargs.pop("stream_options", None)
+            stream = self._client.chat.completions.create(**kwargs)
+
+        content_parts: list[str] = []
+        calls: dict[int, dict[str, str]] = {}
+        usage = Usage()
+
+        for chunk in stream:
+            raw_usage = getattr(chunk, "usage", None)
+            if raw_usage is not None:
+                usage = _usage_from(chunk)
+            for choice in getattr(chunk, "choices", None) or []:
+                delta = getattr(choice, "delta", None)
+                if delta is None:
+                    continue
+                text = getattr(delta, "content", None)
+                if text:
+                    content_parts.append(text)
+                    yield {"type": "delta", "text": text}
+                for call in getattr(delta, "tool_calls", None) or []:
+                    index = getattr(call, "index", 0) or 0
+                    slot = calls.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if getattr(call, "id", None):
+                        slot["id"] = call.id
+                    function = getattr(call, "function", None)
+                    if function is not None:
+                        if getattr(function, "name", None):
+                            slot["name"] = function.name
+                        if getattr(function, "arguments", None):
+                            slot["arguments"] += function.arguments
+
+        tool_calls: list[ToolCall] = []
+        for index in sorted(calls):
+            slot = calls[index]
+            try:
+                args = json.loads(slot["arguments"] or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            tool_calls.append(ToolCall(
+                name=slot["name"],
+                args=args,
+                id=slot["id"],
+            ))
+
+        yield {
+            "type": "done",
+            "response": LLMResponse(
+                content="".join(content_parts),
+                tool_calls=tool_calls,
+                usage=usage,
+            ),
+        }
 
 
 # ---------- 离线假客户端 ----------
@@ -220,3 +313,22 @@ class StubClient:
                 )
             ],
         )
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict] | None = None,
+        timeout: float | None = None,
+    ):
+        """与 chat() 结果一致，只是把文本切成几段推给调用方。
+
+        用于离线测试流式链路：先分块 yield 文本，最后 yield 完整响应。
+        """
+        response = self.chat(messages, tools)
+        text = response.content
+        step = max(1, len(text) // 3) if text else 0
+        for start in range(0, len(text), step or 1):
+            if not text:
+                break
+            yield {"type": "delta", "text": text[start:start + step]}
+        yield {"type": "done", "response": response}

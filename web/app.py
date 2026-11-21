@@ -1193,6 +1193,78 @@ def cancel_ask(req: CancelRequest) -> dict:
 @app.post("/api/ask", response_model=AskResponse)
 def ask(req: AskRequest) -> AskResponse:
     """求解一道题，或在已有会话里追问。"""
+    return _ask_request(req)
+
+
+@app.post("/api/ask-stream")
+def ask_stream(req: AskRequest):
+    """流式求解：SSE 逐段推送正文，最后发一个 done 事件。
+
+    主要用于快速模式：模型输出第一个字就能到达前端，用户不用等整段
+    生成完。校验类错误（空题目、未配置密钥）仍然直接返回 HTTP 状态码；
+    排队和会话冲突在流开始后以 error 事件返回。
+    """
+    if not req.question.strip():
+        raise HTTPException(status_code=400, detail="题目不能为空。")
+    if not config.OPENAI_API_KEY.strip():
+        raise HTTPException(
+            status_code=503,
+            detail="服务端未配置 OPENAI_API_KEY，请在项目根目录 .env 中填写后重启。",
+        )
+
+    events: queue.Queue = queue.Queue()
+    result: dict = {}
+
+    def on_token(text: str) -> None:
+        events.put(("delta", text))
+
+    def run() -> None:
+        try:
+            result["response"] = _ask_request(req, on_token=on_token)
+        except HTTPException as exc:
+            events.put(("error", str(exc.detail)))
+        except Exception as exc:  # 单题失败不拖垮连接
+            events.put(("error", f"求解失败（{type(exc).__name__}: {exc}）"))
+        finally:
+            events.put(("end", None))
+
+    threading.Thread(target=run, daemon=True).start()
+
+    async def stream():
+        while True:
+            kind, payload = await asyncio.to_thread(events.get)
+            if kind == "end":
+                break
+            if kind == "delta":
+                event = {"type": "delta", "text": payload}
+            else:
+                yield "data: " + json.dumps(
+                    {"type": "error", "message": payload},
+                    ensure_ascii=False,
+                ) + "\n\n"
+                return
+            yield "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+
+        response = result.get("response")
+        if response is not None:
+            data = response.model_dump()
+            data["type"] = "done"
+            yield "data: " + json.dumps(
+                data, ensure_ascii=False, default=str
+            ) + "\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _ask_request(req: AskRequest, on_token=None) -> AskResponse:
+    """求解一道题，或在已有会话里追问。"""
     question = req.question.strip()
     if not question:
         raise HTTPException(status_code=400, detail="题目不能为空。")
@@ -1259,6 +1331,7 @@ def ask(req: AskRequest) -> AskResponse:
                 trace=tracer,
                 history=history,
                 cancel_event=cancel_event,
+                on_token=on_token,
             )
         except Exception as e:  # 单题失败不拖垮服务
             answer = f"错误：求解失败（{type(e).__name__}: {e}）"
