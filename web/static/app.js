@@ -686,22 +686,68 @@
     if (detail && event.detail) detail.textContent = event.detail;
   }
 
-  async function submitMultiQuestion(question) {
+  function isProofQuestion(text) {
+    return /证明|求证|试证/.test(String(text || ""));
+  }
+
+  function addFastActions(message, question, data) {
+    const bubble = message.querySelector(".bubble");
+    if (!bubble || bubble.querySelector(".fast-actions")) return;
+
+    const actions = document.createElement("div");
+    actions.className = "fast-actions";
+
+    const badge = document.createElement("span");
+    const usedTools = Number(data.tool_calls || 0) > 0;
+    badge.className = `verification-badge ${usedTools ? "ok" : "warn"}`;
+    badge.textContent = usedTools
+      ? "✓ 已工具验证 · 未独立复核"
+      : "! 未工具验证 · 未独立复核";
+    actions.appendChild(badge);
+
+    const upgrade = document.createElement("button");
+    upgrade.type = "button";
+    upgrade.className = "upgrade-btn";
+    upgrade.textContent = "查看详细过程";
+    upgrade.addEventListener("click", async () => {
+      upgrade.disabled = true;
+      upgrade.textContent = "详细过程生成中…";
+      await submitMultiQuestion(question, {
+        appendUser: false,
+        after: message,
+      });
+      upgrade.textContent = "已生成详细过程";
+    });
+    actions.appendChild(upgrade);
+
+    bubble.appendChild(actions);
+  }
+
+  async function submitMultiQuestion(question, options = {}) {
     const requestId = newRequestId();
     const controller = new AbortController();
     solveRequestId = requestId;
     solveAbort = controller;
 
+    const addUserMessage = options.appendUser !== false;
+    const after = options.after || null;
+
     clearOcrStatus();
     clearOcrDraft();
     setBusy(true);
     hideWelcome();
-    appendUser(question);
-    input.value = "";
-    resizeInput();
+    if (addUserMessage) {
+      appendUser(question);
+      input.value = "";
+      resizeInput();
+    }
 
     const progress = createAgentProgress();
-    chat.appendChild(progress);
+    if (after) {
+      after.insertAdjacentElement("afterend", progress);
+    } else {
+      chat.appendChild(progress);
+    }
     scrollToBottom();
 
     let finished = false;
@@ -805,7 +851,7 @@
     }
   }
 
-  async function submitSingleQuestion(question) {
+  async function submitSingleQuestion(question, mode = "standard") {
     const requestId = newRequestId();
     const controller = new AbortController();
     solveRequestId = requestId;
@@ -832,6 +878,7 @@
           question,
           session_id: sessionId,
           request_id: requestId,
+          ...(mode === "fast" ? { mode: "fast" } : {}),
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -842,7 +889,9 @@
       rememberSession(sessionId);
       input.placeholder = "继续追问这道题，例如：这一步为什么？";
       clearInterval(pending._timer);
-      pending.replaceWith(createAssistantMessage(data));
+      const message = createAssistantMessage(data);
+      if (mode === "fast") addFastActions(message, question, data);
+      pending.replaceWith(message);
       scrollToElement(userMessage);
     } catch (err) {
       clearInterval(pending._timer);
@@ -2496,11 +2545,11 @@
       .join("\n\n");
     if (!question || busy || ocrBusy || ocrFixBusy) return;
 
-    // 新题默认走深度检查；同一会话里的追问保留上下文，走单 Agent。
-    if (!sessionId) {
+    // 默认先给快速答案；证明题自动转多 Agent，其他题可手动升级详细过程。
+    if (isProofQuestion(question)) {
       await submitMultiQuestion(question);
     } else {
-      await submitSingleQuestion(question);
+      await submitSingleQuestion(question, "fast");
     }
   }
 

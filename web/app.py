@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
@@ -28,7 +29,7 @@ from pydantic import BaseModel, Field
 
 import config
 import ocr
-from agent import CANCELLED_MESSAGE, Agent
+from agent import CANCELLED_MESSAGE, FAST_SYSTEM_PROMPT, Agent
 from contracts import Budget
 from eval.extract import extract_final_answer, extract_final_answer_display
 from llm import OpenAIClient
@@ -202,6 +203,20 @@ def get_client():
     return _client
 
 
+_fast_client = None
+_fast_client_lock = threading.Lock()
+
+
+def get_fast_client():
+    """快速模式客户端：关闭 reasoning，优先低延迟。"""
+    global _fast_client
+    if _fast_client is None:
+        with _fast_client_lock:
+            if _fast_client is None:
+                _fast_client = OpenAIClient(reasoning_effort="none")
+    return _fast_client
+
+
 _latex_store = None
 _latex_store_path: Path | None = None
 _latex_lock = threading.Lock()
@@ -268,6 +283,10 @@ class AskRequest(BaseModel):
         max_length=64,
         pattern=r"^[A-Za-z0-9_-]+$",
         description="客户端生成的一次性请求 id，用于“停止生成”",
+    )
+    mode: Literal["standard", "fast"] = Field(
+        default="standard",
+        description="fast：直接看答案；standard：完整讲解",
     )
 
 
@@ -1221,12 +1240,21 @@ def ask(req: AskRequest) -> AskResponse:
             path=trace_path,
         )
 
-        # 题库没构建时不开检索工具，避免每轮都拿到“题库不存在”的工具错误
-        retrieval = index_available()
+        # 快速模式不检索；题库没构建时也不开检索工具，避免无意义的工具错误
+        fast = req.mode == "fast"
+        retrieval = index_available() and not fast
+        agent_client = get_fast_client() if fast else get_client()
+        agent = Agent(
+            client=agent_client,
+            retrieval=retrieval,
+            max_steps=8 if fast else 15,
+            step_timeout=45.0 if fast else 30.0,
+            system_prompt=FAST_SYSTEM_PROMPT if fast else None,
+        )
 
         start = time.perf_counter()
         try:
-            answer = Agent(client=get_client(), retrieval=retrieval).run(
+            answer = agent.run(
                 question,
                 trace=tracer,
                 history=history,

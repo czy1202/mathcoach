@@ -448,6 +448,37 @@ def test_ask_returns_renderable_final_answer(monkeypatch, tmp_path):
     assert data["final_answer_display"] == "$\\lim_{n\\to\\infty}x_n=b$"
 
 
+def test_ask_fast_mode_uses_fast_client_without_retrieval(monkeypatch, tmp_path):
+    """快速模式不检索真题，只保留 sympy 工具，并返回可升级的会话信息。"""
+
+    class FastClient:
+        def __init__(self):
+            self.tool_names = []
+
+        def chat(self, messages, tools=None):
+            self.tool_names = [
+                item["function"]["name"] for item in (tools or [])
+            ]
+            return LLMResponse(content="极限为 3。\n最终答案：3")
+
+    fast_client = FastClient()
+    monkeypatch.setattr(web_app, "_fast_client", fast_client)
+    monkeypatch.setattr(web_app, "TRACE_DIR", tmp_path)
+
+    response = client.post(
+        "/api/ask",
+        json={"question": "计算极限", "mode": "fast"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["final_answer"] == "3"
+    assert data["session_id"]
+    assert data["turn_id"]
+    assert "search_past_problems" not in fast_client.tool_names
+    assert "verify_with_sympy" in fast_client.tool_names
+
+
 def test_ask_rejects_blank_question():
     """只有空白的题目应被拒绝。"""
     response = client.post("/api/ask", json={"question": "   "})

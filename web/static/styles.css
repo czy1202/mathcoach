@@ -2726,3 +2726,58 @@ body.formula-panel-open {
     flex: 1 1 45%;
   }
 }
+
+/* ---------- 快速答案与升级 ---------- */
+
+.fast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.verification-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 9px;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  border: 1px solid transparent;
+}
+
+.verification-badge.ok {
+  color: #15803d;
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+}
+
+.verification-badge.warn {
+  color: #b45309;
+  background: #fffbeb;
+  border-color: #fde68a;
+}
+
+.upgrade-btn {
+  padding: 5px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--accent-deep, #4338ca);
+  font-size: 0.73rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.upgrade-btn:hover:not(:disabled) {
+  background: var(--accent-soft, #eef2ff);
+  border-color: #a5b4fc;
+}
+
+.upgrade-btn:disabled {
+  cursor: default;
+  color: #94a3b8;
+  border-color: #e2e8f0;
+  background: #f8fafc;
+}

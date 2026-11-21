@@ -14,10 +14,10 @@
   默认经 DeepSeek 视觉模型（`deepseek-flash`）整页识别成可编辑文本后再解题；
   也支持本地 Ollama / SimpleTex 作为备选
 - 输出：
-  1. 涉及的知识点
-  2. 解题思路
-  3. 分步解题过程
-  4. 最后一行固定为 `最终答案：<答案>`
+  - 快速模式：最终答案 + 必要关键步骤 + 工具验证状态，最后一行固定为
+    `最终答案：<答案>`
+  - 详细模式：涉及的知识点、解题思路、分步解题过程、最后统一答案；
+    由 Planner → Solver → Verifier 生成并复核
 - 工具：sympy（求导 / 积分 / 极限 / 化简 / 解方程）；CMC 非数学类历年真题检索
 - 真题推荐：回答后附“相关真题”卡片（出处 + 题干 + 知识点），检索结果不作为
   本题的条件；检索用 BM25 + BGE 向量 + RRF
@@ -104,7 +104,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 451 个测试
+pytest                              # 452 个测试
 ```
 
 如果要重建知识库（仓库不包含 PDF）：
@@ -174,10 +174,14 @@ SIMPLETEX_TOKEN=用户自己的令牌
 页面能力：
 
 - 首页居中提供「问题目 / 查看真题」两种模式，互不干扰；点击左上角 ∑ 随时回到模式选择
-- 新题默认开启「深度检查」：Planner → Solver → Verifier 多 Agent，
-  页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、复核结论和耗时；
-  同一会话里的追问走单 Agent 以保留上下文，步骤级追问用每步下方的
-  “问这一步”。多 Agent 的 token 和延迟会比单 Agent 高
+- 默认先返回「快速答案」：单 Agent + 工具验证，不检索真题，适合填空、
+  选择和简单计算；答案下方显示“已工具验证 / 未独立复核”
+- 快速答案下方提供「查看详细过程」：点击后运行 Planner → Solver →
+  Verifier 多 Agent，页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、
+  复核结论和耗时，详细结果追加在快速答案下方
+- 检测到“证明 / 求证 / 试证”时自动走详细过程，避免给出未复核的证明
+- 步骤级追问使用每步下方的“问这一步”；多 Agent 的 token 和延迟会比
+  快速模式高
 - 解题模式：Markdown + KaTeX 渲染公式，`\(...\)` / `\[...\]` 会自动转成美元符号分隔符
 - 解题模式：回答末尾单独提取"最终答案"卡片，正文里重复的那行标记会被去掉
 - 求解等待期间显示「停止」按钮：浏览器立即恢复输入，同时通知服务端在
@@ -224,10 +228,11 @@ SIMPLETEX_TOKEN=用户自己的令牌
 
 后端接口：
 
-- `POST /api/ask`：请求体 `{question, session_id?}`；首次提问不传 `session_id`，
-  响应会返回服务端生成的 id，后续追问带同一个 id。如果模型调用了
-  `list_past_problems`，响应会额外带上完整试卷 `paper`；完整解答还会返回
-  `turn_id`（稳定定位本轮回答）和 `solution`（`intro` / `steps` / `outro`）
+- `POST /api/ask`：请求体 `{question, session_id?, request_id?, mode?}`；
+  `mode="fast"` 走单 Agent、不检索、关闭 reasoning，优先低延迟；
+  默认 `standard` 保留完整讲解。首次提问不传 `session_id`，后续追问带同一个 id。
+  如果模型调用了 `list_past_problems`，响应会额外带上完整试卷 `paper`；
+  完整解答还会返回 `turn_id` 和 `solution`（`intro` / `steps` / `outro`）
 - `POST /api/ask-multi`：请求体 `{question, session_id?, request_id?}`，
   返回 `text/event-stream`。依次推送 `stage` 事件（planner / solver /
   verifier / revision）和 `final` 事件；最终回答会写入会话并返回
@@ -723,10 +728,12 @@ mathcoach/
   结果必须人工核对。也可以切到本机 Ollama（免费但需安装约 2.7 GB 模型）或
   SimpleTex（云端数学 OCR，按额度计费）。DeepSeek / 本地路线只支持 PNG / JPG，
   单张上限 10 MB；整页识别暂不自动切分题目。
-- 多 Agent 深度检查默认开启；最终回答会写入会话，步骤追问可用。
-  Planner / Verifier 与 Solver 使用同一模型，仍可能存在共同盲区；34 题上的
-  多配置消融还要继续跑，当前不能把“多 Agent 一定更好”当成结论。
-  单 Agent 的 `/api/ask` 仍保留，供 API 调用和对照实验使用。
+- 默认快速答案没有独立复核，只保证“计算题尽量走 sympy 验证”，不能保证
+  100% 正确；需要复核时点“查看详细过程”。Planner / Verifier 与 Solver
+  使用同一模型，仍可能存在共同盲区；34 题上的多配置消融还要继续跑，
+  当前不能把“多 Agent 一定更好”当成结论。
+- 快速模式不检索真题，因此答案下方不会出现“相关真题”卡片；详细模式
+  才会展示。
 - `sympy.parse_expr` 最终仍会执行字符串表达式。现在已限制到数学函数/常量的
   命名空间，并拒绝属性访问、分号、引号等非数学语法；这能挡住常见注入，
   但不是独立沙箱。接入不可信公网输入前，仍应放到进程/容器级隔离中解析。
