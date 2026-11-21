@@ -1469,6 +1469,7 @@ def ask_multi(req: MultiAskRequest):
 
     client = get_client()
     retrieval = index_available()
+    cancel_event = register_cancel(req.request_id, owner=session)
     trace_path = new_trace_file(TRACE_DIR, prefix="multi")
     tracer = TraceRecorder(case_id="multi", question=question, path=trace_path)
     events: queue.Queue = queue.Queue()
@@ -1505,11 +1506,16 @@ def ask_multi(req: MultiAskRequest):
     def run() -> None:
         result = None
         try:
-            result = orchestrator.run(question)
+            result = orchestrator.run(question, cancel_event=cancel_event)
             turn_id = None
             with session.lock:
                 still_owner = SESSIONS.end_request(session, request_key)
-                if still_owner and result.answer and not result.answer.startswith("错误："):
+                if (
+                    still_owner
+                    and result.answer
+                    and not result.answer.startswith("错误：")
+                    and result.warning != "cancelled"
+                ):
                     turn_id = SESSIONS.append_turn(session, question, result.answer)
             final_event.update({
                 "session_id": session.id,
@@ -1533,6 +1539,7 @@ def ask_multi(req: MultiAskRequest):
                 "message": f"多 Agent 求解失败（{type(exc).__name__}: {exc}）",
             })
         finally:
+            drop_cancel(req.request_id, cancel_event)
             events.put(None)
             _slots.release()
 

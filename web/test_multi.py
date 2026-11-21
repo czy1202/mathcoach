@@ -32,6 +32,8 @@ def test_multi_stream_with_stub(monkeypatch, tmp_path):
 
     assert events
     assert any(event.get("type") == "stage" for event in events)
+    # Solver 的正文片段应实时推送，而不是等最后的 final
+    assert any(event.get("type") == "delta" for event in events)
     assert any(event.get("type") == "final" for event in events)
     final = next(event for event in events if event.get("type") == "final")
     assert final["answer"]

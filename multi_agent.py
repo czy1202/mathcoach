@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from agent import RETRIEVAL_PROMPT, SYSTEM_PROMPT, Agent
+from agent import CANCELLED_MESSAGE, RETRIEVAL_PROMPT, SYSTEM_PROMPT, Agent
 from contracts import (
     DEFAULT_ALLOWED_TOOLS,
     Budget,
@@ -206,16 +206,34 @@ class Solver:
             raise SolverError(answer or "模型没有返回解答。")
         return answer
 
-    def solve(self, question: str, plan: Plan) -> Draft:
+    def solve(
+        self,
+        question: str,
+        plan: Plan,
+        on_token=None,
+        cancel_event=None,
+    ) -> Draft:
         prompt = (
             f"题目：\n{question}\n\n"
             f"Planner 给出的计划：\n{_plan_text(plan)}\n\n"
             "请按计划完整求解。"
         )
-        answer = self._valid_answer(self._agent_for(plan).run(prompt))
+        answer = self._valid_answer(self._agent_for(plan).run(
+            prompt,
+            on_token=on_token,
+            cancel_event=cancel_event,
+        ))
         return _draft_from_answer(answer)
 
-    def revise(self, question: str, plan: Plan, draft: Draft, review: Review) -> Draft:
+    def revise(
+        self,
+        question: str,
+        plan: Plan,
+        draft: Draft,
+        review: Review,
+        on_token=None,
+        cancel_event=None,
+    ) -> Draft:
         issues = "\n".join(
             f"- 第 {issue.step or '?'} 步 [{issue.severity.value}/{issue.category.value}]：{issue.detail}"
             for issue in review.issues
@@ -228,7 +246,11 @@ class Solver:
             f"建议修正：{review.suggested_fix or '无'}\n\n"
             "请只针对以上问题修正，未涉及的部分保持不动，重新输出完整解答。"
         )
-        answer = self._valid_answer(self._agent_for(plan).run(prompt))
+        answer = self._valid_answer(self._agent_for(plan).run(
+            prompt,
+            on_token=on_token,
+            cancel_event=cancel_event,
+        ))
         return _draft_from_answer(answer)
 
 
@@ -288,7 +310,10 @@ class MultiAgentResult:
             "warning": self.warning,
             "elapsed": round(self.elapsed, 3),
         }
-        if self.warning == "solver_error" or self.answer.startswith("错误："):
+        if (
+            self.warning in ("solver_error", "cancelled")
+            or self.answer.startswith("错误：")
+        ):
             event["error"] = self.answer
         return event
 
@@ -325,9 +350,35 @@ class Orchestrator:
     def _stage(self, stage: str, status: str, detail: str = "") -> None:
         self._event("stage", stage=stage, status=status, detail=detail)
 
-    def run(self, question: str) -> MultiAgentResult:
+    def _token_cb(self, stage: str):
+        """把 Solver 的流式片段包装成 SSE 事件，交给外层立即推送。"""
+        def emit_token(text: str) -> None:
+            if self.emit is not None and text:
+                self.emit({"type": "delta", "stage": stage, "text": text})
+        return emit_token
+
+    @staticmethod
+    def _was_cancelled(cancel_event) -> bool:
+        return cancel_event is not None and cancel_event.is_set()
+
+    def _cancelled_result(self, started: float, plan: Plan | None = None):
+        self._stage("done", "done", "已停止生成")
+        result = MultiAgentResult(
+            answer=CANCELLED_MESSAGE,
+            plan=plan,
+            warning="cancelled",
+            elapsed=time.perf_counter() - started,
+            stages=self.stages,
+        )
+        self._event("final", **result.to_event())
+        return result
+
+    def run(self, question: str, cancel_event=None) -> MultiAgentResult:
         started = time.perf_counter()
         revisions = 0
+
+        if self._was_cancelled(cancel_event):
+            return self._cancelled_result(started)
 
         quick_type = quick_question_type(question)
         if quick_type in (QuestionType.fill, QuestionType.choice):
@@ -365,10 +416,20 @@ class Orchestrator:
                 f"题型：{plan.question_type.value}；策略：{plan.approach or '直接求解'}",
             )
 
+        if self._was_cancelled(cancel_event):
+            return self._cancelled_result(started, plan)
+
         self._stage("solver", "running", "正在按计划解题")
         try:
-            draft = self.solver.solve(question, plan)
+            draft = self.solver.solve(
+                question,
+                plan,
+                on_token=self._token_cb("solver"),
+                cancel_event=cancel_event,
+            )
         except Exception as exc:
+            if self._was_cancelled(cancel_event):
+                return self._cancelled_result(started, plan)
             self._stage("solver", "error", f"解题失败：{type(exc).__name__}")
             result = MultiAgentResult(
                 answer=f"错误：解题失败（{type(exc).__name__}: {exc}）",
@@ -384,6 +445,8 @@ class Orchestrator:
         review: Review | None = None
         warning = ""
         while True:
+            if self._was_cancelled(cancel_event):
+                return self._cancelled_result(started, plan)
             if time.perf_counter() - started > self.budget.max_seconds:
                 warning = "总耗时超过预算，已停止复核。"
                 break
@@ -413,8 +476,14 @@ class Orchestrator:
             revisions += 1
             self._stage("revision", "running", "正在按复核意见定向重解")
             try:
-                draft = self.solver.revise(question, plan, draft, review)
+                draft = self.solver.revise(
+                    question, plan, draft, review,
+                    on_token=self._token_cb("revision"),
+                    cancel_event=cancel_event,
+                )
             except Exception as exc:
+                if self._was_cancelled(cancel_event):
+                    return self._cancelled_result(started, plan)
                 warning = f"重解失败：{type(exc).__name__}"
                 self._stage("revision", "error", warning)
                 break

@@ -2737,6 +2737,27 @@ body.formula-panel-open {
   50% { opacity: 1; transform: scale(1.15); }
 }
 
+/* Solver 流式输出的正文预览：固定高度，内部滚动，阶段条始终可见 */
+.agent-stream {
+  margin-top: 14px;
+  border-top: 1px dashed #e2e8f0;
+  padding-top: 12px;
+}
+
+.agent-stream-head {
+  margin-bottom: 8px;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.agent-stream-body {
+  max-height: 300px;
+  overflow-y: auto;
+  font-size: 0.9rem;
+  line-height: 1.7;
+  scrollbar-width: thin;
+}
+
 @media (max-width: 640px) {
   .agent-steps {
     flex-wrap: wrap;

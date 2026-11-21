@@ -179,7 +179,8 @@ SIMPLETEX_TOKEN=用户自己的令牌
   SSE 流式输出，模型生成到哪就显示到哪，不必等整段回答结束
 - 快速答案下方提供「查看详细过程」：点击后运行 Planner → Solver →
   Verifier 多 Agent，页面实时显示当前阶段（规划 / 解题 / 复核 / 重解）、
-  复核结论和耗时，详细结果追加在快速答案下方
+  复核结论和耗时，详细结果追加在快速答案下方。Solver 的正文也是流式
+  推送的：阶段条下方会实时显示正在书写的解答，点停止会立即中断
 - 检测到“证明 / 求证 / 试证”时自动走详细过程，避免给出未复核的证明
 - 步骤级追问使用每步下方的“问这一步”；多 Agent 的 token 和延迟会比
   快速模式高
@@ -240,7 +241,8 @@ SIMPLETEX_TOKEN=用户自己的令牌
   客户端不支持流式时会自动退回普通调用，不影响结果
 - `POST /api/ask-multi`：请求体 `{question, session_id?, request_id?}`，
   返回 `text/event-stream`。依次推送 `stage` 事件（planner / solver /
-  verifier / revision）和 `final` 事件；最终回答会写入会话并返回
+  verifier / revision）、Solver 正文的 `delta` 事件和最后的 `final` 事件；
+  点停止会通过 `/api/ask/cancel` 中断当前阶段。最终回答会写入会话并返回
   `turn_id` / `solution`，因此回答下方的“问这一步”仍可用
 - `POST /api/ask-step`：针对某一轮回答中的某一步追问。请求体为
   `{question, parent_session_id, parent_turn_id?, parent_turn?, step_index,

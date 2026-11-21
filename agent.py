@@ -30,6 +30,10 @@ CANCELLED_MESSAGE = "已停止生成。"
 class StreamInterrupted(RuntimeError):
     """流式输出中途失败；此时通常已经向用户显示了一部分内容。"""
 
+
+class _CancelledStream(Exception):
+    """流式输出过程中收到取消信号，用于立刻关闭连接。"""
+
 SYSTEM_PROMPT = r"""你是一名数学竞赛解题助手，请按下面的规则回答：
 
 1. 能写成两个表达式是否相等（恒等式、化简、方程验根）时，优先调用
@@ -242,8 +246,10 @@ class Agent:
             # 连续两次超时才判定该题失败，避免白白丢掉一道能做对的题。
             for attempt in (1, 2):
                 try:
-                    resp = self._call_model(messages, on_token)
+                    resp = self._call_model(messages, on_token, cancel_event)
                     break
+                except _CancelledStream:
+                    return self._cancelled(trace, step)
                 except StreamInterrupted as exc:
                     # 已经向用户输出了一部分内容，重试会造成重复文本；
                     # 直接结束，并明确告诉用户这次输出不完整。
@@ -411,16 +417,22 @@ class Agent:
             return usage.as_dict()
         return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-    def _call_model(self, messages: list[dict], on_token=None) -> LLMResponse:
+    def _call_model(
+        self,
+        messages: list[dict],
+        on_token=None,
+        cancel_event: threading.Event | None = None,
+    ) -> LLMResponse:
         """有流式回调且客户端支持时走流式，否则保持原来的阻塞调用。"""
         if on_token is None or not hasattr(self.client, "chat_stream"):
             return self._chat_with_timeout(messages)
-        return self._stream_with_timeout(messages, on_token)
+        return self._stream_with_timeout(messages, on_token, cancel_event)
 
     def _stream_with_timeout(
         self,
         messages: list[dict],
         on_token,
+        cancel_event: threading.Event | None = None,
     ) -> LLMResponse:
         """消费流式响应，同时保留单步超时护栏。
 
@@ -436,6 +448,8 @@ class Agent:
         )
         try:
             for event in stream:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise _CancelledStream()
                 if time.perf_counter() > deadline:
                     if emitted:
                         raise StreamInterrupted("超过单步时限")

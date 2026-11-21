@@ -636,6 +636,10 @@
               </div>`).join("")}
           </div>
           <div class="agent-progress-detail"></div>
+          <div class="agent-stream" hidden>
+            <div class="agent-stream-head">正在书写解答…</div>
+            <div class="agent-stream-body content streaming"></div>
+          </div>
         </div>
       </div>`;
 
@@ -648,6 +652,32 @@
       current.textContent = `${label} · ${((performance.now() - started) / 1000).toFixed(1)}s`;
     }, 100);
     return article;
+  }
+
+  // 详细模式的 Solver 边生成边推送；这里把片段累积起来，节流渲染。
+  function appendAgentDelta(article, event) {
+    if (!article || event.type !== "delta") return;
+    const box = article.querySelector(".agent-stream");
+    if (!box) return;
+    const body = box.querySelector(".agent-stream-body");
+    box.hidden = false;
+    box._text = (box._text || "") + (event.text || "");
+    if (article._streamTimer) return;
+
+    article._streamTimer = setTimeout(() => {
+      article._streamTimer = null;
+      if (!body.isConnected) return;
+      body.innerHTML = renderMarkdown(box._text)
+        + '<span class="stream-cursor" aria-hidden="true"></span>';
+      body.scrollTop = body.scrollHeight;
+    }, 120);
+  }
+
+  function clearAgentStream(article) {
+    if (article && article._streamTimer) {
+      clearTimeout(article._streamTimer);
+      article._streamTimer = null;
+    }
   }
 
   function updateAgentProgress(article, event) {
@@ -798,6 +828,7 @@
 
             if (event.type === "final") {
               clearInterval(progress._timer);
+              clearAgentStream(progress);
               finished = true;
               if (event.error) {
                 progress.replaceWith(createErrorMessage(event.error));
@@ -828,10 +859,13 @@
               scrollToElement(message);
             } else if (event.type === "error") {
               clearInterval(progress._timer);
+              clearAgentStream(progress);
               finished = true;
               progress.replaceWith(
                 createErrorMessage(event.message || "多 Agent 求解失败。"),
               );
+            } else if (event.type === "delta") {
+              if (!finished) appendAgentDelta(progress, event);
             } else {
               updateAgentProgress(progress, event);
             }
@@ -841,12 +875,14 @@
 
       if (!finished) {
         clearInterval(progress._timer);
+        clearAgentStream(progress);
         progress.replaceWith(
           createNoticeMessage("多 Agent 连接结束，但没有收到最终答案。"),
         );
       }
     } catch (err) {
       clearInterval(progress._timer);
+      clearAgentStream(progress);
       if (controller.signal.aborted) {
         progress.replaceWith(createNoticeMessage("已停止生成。"));
       } else {
@@ -1980,6 +2016,7 @@
     activeSolveNode = null;
     if (node) {
       clearInterval(node._timer);
+      clearAgentStream(node);
       node.replaceWith(createNoticeMessage("已停止生成。"));
     }
     setBusy(false);

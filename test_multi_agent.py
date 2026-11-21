@@ -30,11 +30,19 @@ class FakeSolver:
         self.solve_calls = 0
         self.revise_calls = 0
 
-    def solve(self, question: str, plan: Plan) -> Draft:
+    def solve(self, question: str, plan: Plan, on_token=None, cancel_event=None) -> Draft:
         self.solve_calls += 1
         return self.drafts.pop(0)
 
-    def revise(self, question: str, plan: Plan, draft: Draft, review: Review) -> Draft:
+    def revise(
+        self,
+        question: str,
+        plan: Plan,
+        draft: Draft,
+        review: Review,
+        on_token=None,
+        cancel_event=None,
+    ) -> Draft:
         self.revise_calls += 1
         return self.drafts.pop(0)
 
@@ -186,3 +194,53 @@ def test_verifier_only_receives_question_and_draft():
     question, draft = verifier.calls[0]
     assert question == "题"
     assert isinstance(draft, Draft)
+
+
+def test_solver_tokens_are_forwarded_as_delta_events():
+    """Solver 的流式片段应以 delta 事件、带阶段名转发给外层。"""
+    plan = _plan()
+    events = []
+
+    class TokenSolver(FakeSolver):
+        def solve(self, question, plan, on_token=None, cancel_event=None):
+            if on_token is not None:
+                on_token("第一步")
+                on_token("第二步")
+            return super().solve(question, plan)
+
+    solver = TokenSolver([_draft()])
+    Orchestrator(
+        FakePlanner(plan),
+        solver,
+        FakeVerifier([Review(verdict=Verdict.PASS)]),
+        emit=events.append,
+    ).run("题")
+
+    deltas = [event for event in events if event.get("type") == "delta"]
+    assert [event["text"] for event in deltas] == ["第一步", "第二步"]
+    assert all(event["stage"] == "solver" for event in deltas)
+
+
+def test_cancel_before_start_skips_all_stages():
+    """进入状态机前已取消时，不应再调用 Planner/Solver。"""
+    import threading
+
+    from agent import CANCELLED_MESSAGE
+
+    solver = FakeSolver([_draft()])
+    events = []
+    cancel = threading.Event()
+    cancel.set()
+
+    result = Orchestrator(
+        FakePlanner(_plan()),
+        solver,
+        FakeVerifier([]),
+        emit=events.append,
+    ).run("题", cancel_event=cancel)
+
+    assert result.warning == "cancelled"
+    assert result.answer == CANCELLED_MESSAGE
+    assert solver.solve_calls == 0
+    final = next(event for event in events if event.get("type") == "final")
+    assert final["error"] == CANCELLED_MESSAGE
