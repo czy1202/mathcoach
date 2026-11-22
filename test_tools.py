@@ -6,7 +6,8 @@
 
 import pytest
 
-from tools import TOOLS, run_tool, verify_with_sympy
+import config
+from tools import TOOLS, run_python, run_tool, verify_with_sympy
 
 
 # ---------- verify_with_sympy：等价（应返回 True）----------
@@ -174,3 +175,101 @@ def test_run_tool_timeout_returns_error_text(monkeypatch):
     assert isinstance(result, str)
     assert "超时" in result
     assert "slow_test_tool" in result
+
+
+# ---------- run_python：子进程执行与安全护栏 ----------
+
+def test_run_python_prints_result():
+    result = run_python("print(1 + 1)")
+
+    assert "[stdout]" in result
+    assert "2" in result
+    assert "[退出码] 0" in result
+
+
+def test_run_python_reports_exception():
+    result = run_python("print(1 / 0)")
+
+    assert "ZeroDivisionError" in result
+    assert "退出码" in result
+
+
+def test_run_python_timeout_kills_process():
+    """死循环必须在超时后终止，而不是拖住整个请求。"""
+    result = run_python("while True:\n    pass", timeout=0.8)
+
+    assert "超时" in result
+    assert "已终止" in result
+
+
+def test_run_python_blocks_network_client_import():
+    """requests 这类网络客户端直接禁止导入，给出明确原因。"""
+    result = run_python("import requests\nprint('ok')")
+
+    assert "沙箱禁用模块" in result
+    assert "requests" in result
+
+
+def test_run_python_blocks_network_connect():
+    """socket 本身允许导入（科学计算库依赖），但真正建连必须失败。"""
+    result = run_python(
+        "import urllib.request\n"
+        "urllib.request.urlopen('http://example.com')\n"
+    )
+
+    assert "PermissionError" in result
+    assert "沙箱禁止" in result
+
+
+def test_run_python_scrubs_api_keys(monkeypatch):
+    """子进程只能看到白名单环境变量，密钥不会被打印出来。"""
+    monkeypatch.setenv("MATHCOACH_SECRET_KEY", "should-not-leak")
+
+    result = run_python(
+        "import os\n"
+        "print(os.environ.get('MATHCOACH_SECRET_KEY', 'missing'))\n"
+    )
+
+    assert "should-not-leak" not in result
+    assert "missing" in result
+
+
+def test_run_python_truncates_output():
+    result = run_python("print('x' * 5000)", max_output=100)
+
+    assert "输出已截断" in result
+    assert len(result) < 1000
+
+
+def test_run_python_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(config, "RUN_PYTHON_ENABLED", False)
+
+    result = run_python("print(1)")
+
+    assert "未启用" in result
+
+
+def test_run_python_is_registered_as_tool():
+    assert "run_python" in TOOLS
+    assert "code" in TOOLS["run_python"]["参数说明"]
+
+
+def test_run_python_blocks_reading_project_files():
+    """模型代码不能读项目里的 .env 等文件，避免密钥被打印出来。"""
+    import pathlib
+
+    target = pathlib.Path(".env").resolve()
+    result = run_python(f"print(open({str(target)!r}).read())")
+
+    assert "沙箱禁止访问该路径" in result
+
+
+def test_run_python_allows_writes_in_workdir():
+    """临时工作目录内允许创建文件，方便写中间结果。"""
+    result = run_python(
+        "open('out.txt', 'w').write('ok')\n"
+        "print(open('out.txt').read())\n"
+    )
+
+    assert "ok" in result
+    assert "[退出码] 0" in result

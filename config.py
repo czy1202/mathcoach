@@ -78,3 +78,26 @@ SIMPLETEX_BASE_URL: str = (
     os.getenv("SIMPLETEX_BASE_URL", "").strip()
     or "https://server.simpletex.cn/api"
 ).rstrip("/")
+
+# 代码执行工具（run_python）：在子进程里跑模型给出的 Python，用于数值计算与验证。
+# 默认开启，适合本地个人使用；如果要部署到公网，建议设为 0 或换成容器沙箱。
+RUN_PYTHON_ENABLED: bool = os.getenv(
+    "RUN_PYTHON_ENABLED", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
+_run_python_timeout = os.getenv("RUN_PYTHON_TIMEOUT", "").strip()
+try:
+    RUN_PYTHON_TIMEOUT: float = float(_run_python_timeout) if _run_python_timeout else 8.0
+except ValueError:
+    RUN_PYTHON_TIMEOUT = 8.0
+if RUN_PYTHON_TIMEOUT <= 0:
+    RUN_PYTHON_TIMEOUT = 8.0
+
+_run_python_output = os.getenv("RUN_PYTHON_MAX_OUTPUT", "").strip()
+try:
+    RUN_PYTHON_MAX_OUTPUT: int = (
+        int(_run_python_output) if _run_python_output else 4000
+    )
+except ValueError:
+    RUN_PYTHON_MAX_OUTPUT = 4000
+if RUN_PYTHON_MAX_OUTPUT <= 0:
+    RUN_PYTHON_MAX_OUTPUT = 4000

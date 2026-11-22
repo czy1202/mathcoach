@@ -12,6 +12,10 @@ import math
 import os
 import random
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -118,6 +122,268 @@ def verify_with_sympy(expr_a: Any, expr_b: Any) -> bool | str:
     return "无法判定：符号化简未归零，且无法用数值抽样比较。"
 
 
+# ---------- 代码执行工具（子进程隔离） ----------
+
+# 注入到用户代码之前的前导脚本：导入危险模块直接报错，并禁用 os 的进程接口。
+# 这是“护栏”不是安全沙箱：本地单用户场景用于降低误用风险，公网部署应换容器。
+_SANDBOX_PREAMBLE = r'''
+import builtins, os, sys
+
+# 注意：numpy/scipy 在 import 时就会用到 ctypes、subprocess、socket，
+# 直接禁用模块会破坏科学计算库。因此：只禁用明确不用的网络客户端，
+# 进程/网络模块允许 import，但把真正的执行接口替换成报错函数。
+_BANNED_MODULES = {
+    "requests", "httpx", "webbrowser", "ftplib", "smtplib",
+    "telnetlib", "pty",
+}
+
+class _ModuleGuard:
+    @staticmethod
+    def find_spec(name, path=None, target=None):
+        root = name.split(".", 1)[0]
+        if root in _BANNED_MODULES:
+            raise PermissionError(f"沙箱禁用模块：{name}")
+        return None
+
+sys.meta_path.insert(0, _ModuleGuard())
+
+def _blocked(*args, **kwargs):
+    raise PermissionError("沙箱禁止启动外部进程或访问网络")
+
+for _name in ("system", "popen", "execv", "execve", "execvp", "execvpe",
+              "spawnv", "spawnve", "spawnl", "spawnle", "fork", "forkpty"):
+    if hasattr(os, _name):
+        setattr(os, _name, _blocked)
+
+# 网络：保留 socket 模块本身（numpy/platform 会 import，ssl 还要继承
+# socket 类），但禁止建连、解析和监听。不能把 socket.socket 换成函数，
+# 否则 ssl 定义 SSLSocket 时会直接报错。
+try:
+    import socket as _socket
+    for _name in ("create_connection", "create_server", "getaddrinfo",
+                  "gethostbyname", "gethostbyname_ex"):
+        if hasattr(_socket, _name):
+            setattr(_socket, _name, _blocked)
+    for _name in ("connect", "connect_ex", "bind", "sendto"):
+        if hasattr(_socket.socket, _name):
+            setattr(_socket.socket, _name, _blocked)
+except Exception:
+    pass
+
+# 允许 import 但禁止真正启动进程；这样 scipy 等库可以正常加载。
+try:
+    import subprocess as _sp
+    for _name in ("Popen", "run", "call", "check_call", "check_output",
+                  "getoutput", "getstatusoutput"):
+        if hasattr(_sp, _name):
+            setattr(_sp, _name, _blocked)
+except Exception:
+    pass
+
+try:
+    import multiprocessing as _mp
+    for _name in ("Process", "Pool", "Pipe", "Queue", "Manager"):
+        if hasattr(_mp, _name):
+            setattr(_mp, _name, _blocked)
+except Exception:
+    pass
+
+# 文件访问：允许读标准库/依赖包/临时目录，只允许写临时工作目录。
+# 这样模型即使打印文件内容，也读不到项目里的 .env。
+import io as _io
+import tempfile as _tempfile
+
+_CWD = os.path.normcase(os.path.abspath(os.getcwd()))
+_READ_ROOTS = tuple(
+    os.path.normcase(os.path.abspath(p))
+    for p in (_CWD, sys.prefix, sys.base_prefix, _tempfile.gettempdir(),
+              os.path.dirname(os.__file__))
+    if p
+)
+
+def _path_allowed(path, write):
+    try:
+        full = os.path.normcase(os.path.abspath(os.fspath(path)))
+    except (TypeError, ValueError):
+        return True  # 文件描述符等非路径参数，交给原函数处理
+    try:
+        if write:
+            return os.path.commonpath([full, _CWD]) == _CWD
+        return any(
+            os.path.commonpath([full, root]) == root for root in _READ_ROOTS
+        )
+    except ValueError:
+        return False
+
+def _guard_open(original):
+    def wrapper(file, mode="r", *args, **kwargs):
+        write = any(ch in mode for ch in "wax+")
+        if not _path_allowed(file, write):
+            raise PermissionError(f"沙箱禁止访问该路径：{file}")
+        return original(file, mode, *args, **kwargs)
+    return wrapper
+
+builtins.open = _guard_open(builtins.open)
+_io.open = _guard_open(_io.open)
+
+_original_os_open = os.open
+
+def _safe_os_open(path, flags, *args, **kwargs):
+    write = bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND))
+    if not _path_allowed(path, write):
+        raise PermissionError(f"沙箱禁止访问该路径：{path}")
+    return _original_os_open(path, flags, *args, **kwargs)
+
+os.open = _safe_os_open
+'''
+
+# 只透传运行 Python 必需的环境变量；任何 KEY/TOKEN 都不会进入子进程。
+_SANDBOX_ENV_KEYS = ("PATH", "SYSTEMROOT", "WINDIR")
+
+RUN_PYTHON_MAX_CODE = 4000
+
+
+def _sandbox_env(workdir: Path) -> dict[str, str]:
+    """最小环境：只有路径类变量，HOME/TEMP 都指向临时目录。"""
+    env = {key: os.environ[key] for key in _SANDBOX_ENV_KEYS if key in os.environ}
+    env["TEMP"] = env["TMP"] = str(workdir)
+    env["HOME"] = env["USERPROFILE"] = str(workdir)
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
+
+
+def _kill_process_tree(proc: subprocess.Popen) -> None:
+    """超时后连同子进程一起结束，避免计算进程残留。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=5,
+            )
+            return
+        except Exception:
+            pass
+    else:
+        import signal
+
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+        except Exception:
+            pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def _truncate(text: str, limit: int) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...（输出已截断，原长 {len(text)} 字符）"
+
+
+def run_python(
+    code: Any,
+    timeout: float | None = None,
+    max_output: int | None = None,
+) -> str:
+    """在隔离子进程中执行一小段 Python，用于数值计算与验证。
+
+    为什么用子进程而不是线程：Python 无法强行终止线程，sympy 之类
+    长时间计算会把整个请求卡死；子进程可以超时后直接杀掉。
+
+    安全边界（本地护栏，不是真正的沙箱）：
+    - 只透传最小环境变量，API Key 不会进入子进程；
+    - 禁用网络/子进程/ctypes 等模块，覆盖 os.system 等进程接口；
+    - 临时工作目录、8 秒硬超时、输出截断；
+    - 公网部署应改用容器 / WASM 等真正的隔离方案。
+
+    Args:
+        code: Python 源码；必须用 print 输出需要的结果。
+        timeout: 超时秒数，默认读 config.RUN_PYTHON_TIMEOUT。
+        max_output: stdout/stderr 各截断到多少字符。
+
+    Returns:
+        执行结果文本；任何失败都返回可读说明，不抛异常。
+    """
+    if not config.RUN_PYTHON_ENABLED:
+        return "错误：代码执行工具未启用（RUN_PYTHON_ENABLED=0）。"
+    if not isinstance(code, str) or not code.strip():
+        return "错误：code 不能为空。"
+    if len(code) > RUN_PYTHON_MAX_CODE:
+        return f"错误：代码过长（上限 {RUN_PYTHON_MAX_CODE} 字符）。"
+
+    timeout = float(timeout or config.RUN_PYTHON_TIMEOUT)
+    max_output = int(max_output or config.RUN_PYTHON_MAX_OUTPUT)
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="mathcoach-sandbox-"))
+    script = tmpdir / "main.py"
+    script.write_text(_SANDBOX_PREAMBLE + "\n" + code + "\n", encoding="utf-8")
+
+    popen_kwargs: dict[str, Any] = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, "-I", "-X", "utf8", str(script)],
+            cwd=str(tmpdir),
+            env=_sandbox_env(tmpdir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **popen_kwargs,
+        )
+    except Exception as exc:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return f"错误：无法启动代码执行进程（{type(exc).__name__}: {exc}）。"
+
+    timed_out = False
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=2)
+        except Exception:
+            out, err = "", ""
+        timed_out = True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if timed_out:
+        parts = [
+            f"错误：代码执行超时（超过 {timeout:g} 秒），进程已终止。"
+            "请简化计算或缩短循环。"
+        ]
+        if out.strip():
+            parts.append("[超时前的输出]\n" + _truncate(out, max_output))
+        return "\n\n".join(parts)
+
+    if not out.strip() and not err.strip():
+        return "代码执行成功，但没有输出。请用 print(...) 输出需要的结果。"
+
+    sections: list[str] = []
+    if out.strip():
+        sections.append("[stdout]\n" + _truncate(out, max_output))
+    if err.strip():
+        sections.append("[stderr]\n" + _truncate(err, max_output))
+    sections.append(f"[退出码] {proc.returncode}")
+    body = "\n\n".join(sections)
+    if proc.returncode != 0:
+        return f"错误：代码执行出错（退出码 {proc.returncode}）：\n\n{body}"
+    return body
+
+
 TOOLS: dict[str, dict] = {
     "verify_with_sympy": {
         "函数": verify_with_sympy,
@@ -129,6 +395,20 @@ TOOLS: dict[str, dict] = {
         "参数说明": {
             "expr_a": "第一个表达式，字符串，例如 'sin(x)**2 + cos(x)**2'",
             "expr_b": "第二个表达式，字符串，例如 '1'",
+        },
+    },
+    "run_python": {
+        "函数": run_python,
+        "描述": (
+            "在隔离的 Python 子进程中执行一小段代码，用于数值积分、估算、"
+            "批量计算和答案验证。代码必须用 print() 输出结果，否则看不到；"
+            "单次限时 8 秒，禁止联网、读写项目文件和启动子进程。"
+            "极限/积分数值验证时，取满足条件的特殊值代入，把数值结果"
+            "和你的答案比较。注意 x**n 在 n 很大且 x>1 时会溢出，"
+            "可改用 exp(n*log(x)) 或分段处理。"
+        ),
+        "参数说明": {
+            "code": "完整的 Python 代码，字符串；必须用 print 输出结果",
         },
     },
 }
