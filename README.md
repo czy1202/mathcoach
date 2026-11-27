@@ -18,7 +18,8 @@
     `最终答案：<答案>`
   - 详细模式：涉及的知识点、解题思路、分步解题过程、最后统一答案；
     由 Planner → Solver → Verifier 生成并复核
-- 工具：sympy（求导 / 积分 / 极限 / 化简 / 解方程）；CMC 非数学类历年真题检索
+- 工具：sympy（等价比对）；隔离子进程里的 Python（数值积分、估算、答案验证）；
+  CMC 非数学类历年真题检索
 - 真题推荐：回答后附“相关真题”卡片（出处 + 题干 + 知识点），检索结果不作为
   本题的条件；检索用 BM25 + BGE 向量 + RRF
 - 拒答：题干信息不全，或题目本身是未解决猜想时，说明原因并请用户补充，
@@ -104,7 +105,7 @@ python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 452 个测试
+pytest                              # 469 个测试
 ```
 
 如果要重建知识库（仓库不包含 PDF）：
@@ -411,7 +412,8 @@ CMC_QUERY_PREFIX=
 - **首次检索会加载模型**（本机 CPU 约 7 秒），之后同一进程内复用；
   向量缓存重新构建后需要重启 Web 进程，或者调用 `tools.clear_vector_cache()`。
 - `sentence-transformers` 会安装 CPU 版 torch（数百 MB），模型文件约 100 MB；
-  下载路径由 `CMC_MODEL_CACHE` / `HF_HOME` 控制，本项目放在 D 盘。
+  首次 `pip install` 会明显慢一些。模型缓存路径由 `.env` 里的
+  `CMC_MODEL_CACHE` / `HF_HOME` 控制，默认放在项目的 `models/` 下。
 
 ### 按届浏览完整真题
 
@@ -791,8 +793,9 @@ mathcoach/
    把当前 BM25 / BGE / RRF 数字固定为正式基线，避免继续在同一组查询上调参。
 3. 在冻结的留出集上验证 RRF 收益；针对 h01 这类失败样本尝试 cross-encoder
    rerank 或 query-adaptive 融合，并重新设计或移除基本无效的标签加权。
-4. Planner → Solver → Verifier 多 Agent 协作，与当前单 Agent 做消融对比。
-5. 完善 Web 版：流式输出、整页识别后的自动题目切分，以及带登录和限流后的公网部署。
+4. 已经有 Planner → Solver → Verifier 多 Agent 流程和快速/详细两种模式，
+   下一步是在 34 题上跑 A/C/E 消融，用数据说明多 Agent 的收益与代价。
+5. 完善 Web 版：整页识别后的自动题目切分，以及带登录和限流后的公网部署。
 6. 继续补齐官方答案：第 13 届补赛 10 题需要另找来源，决赛 177 题目前没有
    官方解答；已导入的初赛答案仍要抽查 OCR 公式，并把校对结果回写
    `kb/answers.jsonl`（本地 `data/processed/answers.jsonl` 同步一份）。
