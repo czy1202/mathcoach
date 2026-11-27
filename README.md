@@ -104,10 +104,12 @@ python agent.py                     # StubClient 离线演示，不联网
 python -m eval.run_eval --stub      # 离线跑通评测流程
 python -m eval.run_eval --real      # 真实模型跑评测并输出通过率
 python -m eval.run_eval --real --verify   # 再对失败的题做独立复核 + 重解
+python -m eval.ablation --stub            # 消融流程冒烟（A/C 配置）
+python -m eval.ablation --real --kinds 填空 --limit 6   # 小样本消融
 python -m eval.trace_report traces/eval-xxxx.jsonl   # 查看耗时 / token / 工具调用
 python -m eval.ocr_eval --sections fill,choice,solve   # OCR 评测：真题裁成单题
 python -m eval.ocr_eval --degrade phone               # 同一批题模拟手机拍照退化
-pytest                              # 469 个测试
+pytest                              # 472 个测试
 ```
 
 如果要重建知识库（仓库不包含 PDF）：
@@ -584,6 +586,20 @@ sympy 调用可能连锁导致撞上 15 步上限。复核后的数字包含最�
 “等价 / 不等价 / 无法判定”三态，并对常数表达式做高精度数值回退。2024-J5
 是单次模型调用超时直接终止整题，现在自动重试一次。`temperature=0` 会让模型
 重复失败调用，实测降到 27/34，已回退为不传。
+
+### 多 Agent 消融（小样本冒烟）
+
+`eval/ablation.py` 用同一套判分口径对比不同配置。目前只跑了一次小样本
+（2024 年 6 道填空题，A/C 各 1 轮），**样本太小，不能作为结论**：
+
+| 配置 | 通过 | 平均耗时 | 平均 tokens | 平均调用 |
+| --- | --- | --- | --- | --- |
+| A 单 Agent | 6/6 | 7.5s | 3,870 | 1.7 |
+| C 多 Agent | 6/6 | 20.6s | 8,756 | 3.3 |
+
+填空题上两种配置都全对，多 Agent 耗时约 2.7 倍、token 约 2.3 倍，没有带来
+准确率收益——这也是网页端对填空/选择跳过 Planner 的依据。真实差距更可能
+出现在解答题和证明题上；完整 A/B/C 消融尚未运行。
 
 > 注意：34 道题、单轮运行的样本量仍然很小，且证明题是启发式判分。
 > 这组数字用于版本间回归对比，不应被解读为模型在真实考试中的得分；
